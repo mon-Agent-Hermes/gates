@@ -59,6 +59,8 @@ navigateur classé « API HTTP » parce que la spec contenait le mot *server*).
 | `roots` | `assembly` | dossiers de livrables à contrôler (défaut `src`) |
 | `app.start`+`url` | `smoke` | l'app démarre et répond ; `paths` = routes qui ne doivent pas répondre 404 |
 | `app.page` | `smoke` | rendu réel dans Chrome headless (canvas, appels de dessin, erreurs console) |
+| `probes` | `probes` | scénarios d'observation de l'artefact (kinds `cli`, `artifact`) — `$TMP` neuf par probe |
+| `specFile` | `spec-coverage` | fichier des `AC-n` (défaut `spec.md`) : chaque critère doit avoir une probe |
 
 Le check `assembly` suit le graphe réel depuis le point d'entrée (`index.html`, sinon
 `src/main.*`) et échoue sur tout livrable jamais atteint — assets CSS compris.
@@ -78,8 +80,29 @@ npm run typecheck   # tsc --noEmit
 npm test            # vitest (38 tests, dont un vrai navigateur si Chrome présent)
 ```
 
+## Probes (§2.5)
+
+```json
+"probes": [
+  { "id": "init-cree-la-config", "criterion": "AC-3", "kind": "cli",
+    "run": "node bin/cli.mjs init $TMP",
+    "expect": { "exitCode": 0, "stdout": "/Configuration écrite/", "files": ["$TMP/config.json"] } },
+  { "id": "genere-le-rapport", "criterion": "AC-4", "kind": "artifact",
+    "run": "node bin/cli.mjs export $TMP/out.pdf", "file": "$TMP/out.pdf",
+    "expect": { "minBytes": 1000 } }
+]
+```
+
+`$TMP` est un dossier neuf par probe, effacé ensuite. Une probe échouée nomme **la
+probe** (`init-cree-la-config : fichier attendu absent`), pas le check. `stdout`/`stderr`
+acceptent une regex slashée (`"/…/"`) ou une sous-chaîne littérale.
+
 ## Non encore porté (viendra ensuite)
 
-La refonte `probes` / `coverage` (atteignabilité par exécution) / `spec-coverage`
-(critères AC-n) décrite aux §2.5-2.7 du doc. Ce premier jet couvre : commandes déclarées,
-livrables, assemblage statique, smoke (routes + rendu).
+- **Probes `browser` / `http` / `process`** : elles exigent l'app démarrée ; leur harnais
+  suit la généralisation de `runSmoke`. D'ici là elles sont `skipped` (jamais un faux vert).
+- **`coverage` (§2.6)** — atteignabilité **par exécution** (lancer les probes sous
+  couverture V8/CDP, échouer sur tout livrable à 0 ligne exécutée).
+
+Déjà couvert : commandes déclarées, livrables, assemblage statique, smoke (routes +
+rendu), **probes `cli`/`artifact`**, **spec-coverage**.
