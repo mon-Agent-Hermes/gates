@@ -118,12 +118,32 @@ tient debout (réponse HTTP sur `url`, ou ligne de log `logMatch`).
 ]
 ```
 
-## Non encore porté (viendra ensuite)
+Le check `smoke` et les probes `http`/`browser` partagent **une seule** instance : quand
+`app` et des probes serveur coexistent, l'app est démarrée **une fois** puis arrêtée (pas
+un démarrage par check).
 
-- **`coverage` (§2.6)** — atteignabilité **par exécution** : lancer les probes sous
-  couverture (`NODE_V8_COVERAGE` côté Node, `Profiler.takePreciseCoverage` par CDP côté
-  navigateur) et échouer sur tout livrable à 0 ligne exécutée. Dépend du harnais de probes,
-  désormais en place.
+## En cours — `coverage` (§2.6)
 
-Déjà couvert : commandes déclarées, livrables, assemblage statique, smoke (routes +
-rendu), **probes `cli` / `artifact` / `http` / `browser` / `process`**, **spec-coverage**.
+Atteignabilité **par exécution** : lancer les probes sous couverture et échouer sur tout
+livrable jamais exécuté (« mort ou vivant », seuil ≥ 1 ligne, pas un pourcentage).
+Strictement plus fort que l'assemblage statique — un module importé mais dont le code
+n'est jamais atteint passe l'assemblage et échoue ici.
+
+**État : amorcé, PAS encore câblé ni validé.**
+- ✅ écrit : `src/coverage.ts` (lecture des rapports `NODE_V8_COVERAGE`, glob
+  `requireExecuted`/`allowUnexecuted`, verdict) + instrumentation des probes `cli`/`artifact`
+  (variable `covDir` transmise à leur process Node).
+- ⬜ reste : câbler dans `gates check` (créer le dossier de couverture, le passer aux
+  probes, agréger le verdict), **écrire les tests**, valider en bout-en-bout (§8 point 3 :
+  `assembly` vert + `coverage` rouge sur un fichier atteignable mais jamais exécuté).
+- ⬜ hors périmètre du jet Node : couverture navigateur (`Profiler.takePreciseCoverage`
+  par CDP + source maps) et serveur (un process tué ne vide pas sa couverture V8).
+
+> Le module `coverage.ts` n'est encore appelé par personne : il compile mais n'est pas
+> testé. À reprendre là avant tout autre chantier.
+
+## Déjà porté et validé
+
+Commandes déclarées · livrables · assemblage statique · smoke (routes + rendu) ·
+probes **`cli` / `artifact` / `http` / `browser` / `process`** · **spec-coverage** ·
+harnais serveur (app partagée, un seul démarrage). **62 tests verts.**

@@ -139,12 +139,16 @@ const skip = (p: { id: string; criterion?: string }, output: string): ProbeResul
 
 // ── Probes autonomes (aucun serveur) ────────────────────────────────────────────
 
-async function runCliProbe(p: CliProbe, timeoutMs: number): Promise<ProbeResult> {
+async function runCliProbe(p: CliProbe, timeoutMs: number, covDir?: string): Promise<ProbeResult> {
   const tmp = await mkdtemp(join(tmpdir(), "gates-probe-"));
   const reasons: string[] = [];
   try {
     const exp = p.expect ?? {};
-    const res = await execa(expand(p.run, tmp), { shell: true, reject: false, all: true, timeout: timeoutMs });
+    const res = await execa(expand(p.run, tmp), {
+      shell: true, reject: false, all: true, timeout: timeoutMs,
+      // NODE_V8_COVERAGE : le process Node écrit sa couverture ici à la sortie (§2.6).
+      env: covDir ? { NODE_V8_COVERAGE: covDir } : undefined,
+    });
     if (exp.exitCode !== undefined && res.exitCode !== exp.exitCode) {
       reasons.push(`code de sortie ${res.exitCode} (attendu ${exp.exitCode})`);
     }
@@ -170,12 +174,15 @@ async function runCliProbe(p: CliProbe, timeoutMs: number): Promise<ProbeResult>
   return reasons.length ? fail(p, reasons.join(" ; ")) : pass(p, "effet observé (code/sortie/fichiers conformes)");
 }
 
-async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number): Promise<ProbeResult> {
+async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, covDir?: string): Promise<ProbeResult> {
   const tmp = await mkdtemp(join(tmpdir(), "gates-probe-"));
   const reasons: string[] = [];
   try {
     const exp = p.expect ?? {};
-    if (p.run) await execa(expand(p.run, tmp), { shell: true, reject: false, all: true, timeout: timeoutMs });
+    if (p.run) await execa(expand(p.run, tmp), {
+      shell: true, reject: false, all: true, timeout: timeoutMs,
+      env: covDir ? { NODE_V8_COVERAGE: covDir } : undefined,
+    });
     const fp = expand(p.file, tmp);
     let size = -1;
     try {
@@ -298,7 +305,7 @@ export async function runProbe(p: Probe, timeoutMs = 120_000, dir = process.cwd(
  */
 export async function runProbesAgainst(
   probes: Probe[],
-  opts: { dir?: string; baseUrl?: string; timeoutMs?: number } = {},
+  opts: { dir?: string; baseUrl?: string; timeoutMs?: number; covDir?: string } = {},
 ): Promise<ProbeResult[]> {
   const dir = opts.dir ?? process.cwd();
   const timeoutMs = opts.timeoutMs ?? 120_000;
@@ -307,8 +314,8 @@ export async function runProbesAgainst(
   // 1. Probes autonomes (cli, artifact, process, inconnu).
   for (let i = 0; i < probes.length; i++) {
     const p = probes[i];
-    if (p.kind === "cli") results[i] = await runCliProbe(p as CliProbe, timeoutMs);
-    else if (p.kind === "artifact") results[i] = await runArtifactProbe(p as ArtifactProbe, timeoutMs);
+    if (p.kind === "cli") results[i] = await runCliProbe(p as CliProbe, timeoutMs, opts.covDir);
+    else if (p.kind === "artifact") results[i] = await runArtifactProbe(p as ArtifactProbe, timeoutMs, opts.covDir);
     else if (p.kind === "process") results[i] = await runProcessProbe(p as ProcessProbe, dir);
     else if (p.kind !== "http" && p.kind !== "browser") results[i] = skip(p, `kind « ${p.kind} » inconnu`);
   }
