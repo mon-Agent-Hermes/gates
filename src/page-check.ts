@@ -36,6 +36,16 @@ export type PageRequirements = {
   waitMs?: number;
 };
 
+/** Interaction à jouer sur la page avant observation (probe `browser`, §2.5). */
+export type PageAction = {
+  /** Sélecteur CSS à cliquer. */
+  click?: string;
+  /** Saisir `text` dans le champ `selector`. */
+  type?: { selector: string; text: string };
+  /** Attendre N ms (laisser une transition/rendu se faire). */
+  wait?: number;
+};
+
 export type PageObservation = {
   url: string;
   title: string;
@@ -187,7 +197,11 @@ const INSTRUMENT = `(() => {
  * Ouvre l'URL dans Chrome (headless) et renvoie les faits observés.
  * `null` = aucun navigateur disponible sur la machine (gate skippé, pas échoué).
  */
-export async function observePage(url: string, req: PageRequirements = {}): Promise<PageObservation | null> {
+export async function observePage(
+  url: string,
+  req: PageRequirements = {},
+  actions: PageAction[] = [],
+): Promise<PageObservation | null> {
   const executablePath = findChrome();
   if (!executablePath) return null;
 
@@ -227,6 +241,20 @@ export async function observePage(url: string, req: PageRequirements = {}): Prom
     });
     // Laisser l'app démarrer et rendre au moins une frame.
     await new Promise((r) => setTimeout(r, req.waitMs ?? 4000));
+
+    // Jouer les interactions (probe browser) : clic, saisie, attente. Un sélecteur
+    // introuvable est une exception applicative (la feature n'est pas là), donc retenue.
+    for (const act of actions) {
+      if (act.click) {
+        await page.click(act.click).catch((e: any) => pageErrors.push(`clic impossible sur ${act.click} : ${e?.message ?? e}`));
+      }
+      if (act.type) {
+        await page.type(act.type.selector, act.type.text).catch((e: any) => pageErrors.push(`saisie impossible sur ${act.type!.selector} : ${e?.message ?? e}`));
+      }
+      if (act.wait) await new Promise((r) => setTimeout(r, act.wait));
+    }
+    // Laisser le rendu consécutif aux actions se produire.
+    if (actions.length) await new Promise((r) => setTimeout(r, 500));
 
     const selectors = req.requireSelectors ?? [];
     const facts = await page.evaluate((sels: string[]) => {

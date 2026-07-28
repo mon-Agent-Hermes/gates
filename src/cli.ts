@@ -114,9 +114,13 @@ export async function check(
     checks.push(await runSmoke(dir, smoke, cfg.app.readyTimeoutMs ?? 30_000));
   }
 
-  // 6. Probes : l'artefact fait-il son travail ? (cli/artifact ; §2.5)
+  // 6. Probes : l'artefact fait-il son travail ? (§2.5). Les http/browser sondent
+  //    l'app démarrée par le harnais (déclarée dans `app`).
   if (want("probes") && cfg.probes?.length) {
-    checks.push(aggregateProbes(await runProbes(cfg.probes)));
+    const app = cfg.app?.start && cfg.app?.url
+      ? { start: cfg.app.start, url: cfg.app.url, readyTimeoutMs: cfg.app.readyTimeoutMs }
+      : undefined;
+    checks.push(aggregateProbes(await runProbes(cfg.probes, { dir, app })));
   }
 
   // 7. spec-coverage : tout AC-n a sa probe, toute probe vise un AC-n réel (§2.7).

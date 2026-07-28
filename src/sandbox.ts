@@ -329,6 +329,91 @@ export async function runSmoke(dir: string, smoke: SmokeConfig, timeoutMs = 30_0
   }
 }
 
+/** Attend qu'une ligne de log corresponde à `pattern` (`/regex/` ou sous-chaîne). */
+async function waitForLog(getLogs: () => string, pattern: string, timeoutMs: number): Promise<boolean> {
+  const m = pattern.match(/^\/(.*)\/([a-z]*)$/s);
+  let test: (s: string) => boolean;
+  if (m) {
+    try {
+      const re = new RegExp(m[1], m[2]);
+      test = (s) => re.test(s);
+    } catch {
+      test = (s) => s.includes(pattern);
+    }
+  } else {
+    test = (s) => s.includes(pattern);
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (test(getLogs())) return true;
+    await sleep(200);
+  }
+  return false;
+}
+
+export type StartedApp = {
+  /** URL de base pour composer les sondes (vide pour un démon sans HTTP). */
+  baseUrl: string;
+  /** Logs de démarrage accumulés (tronqués). */
+  logs: () => string;
+  /** Arrête l'app : tue l'arbre de process + libère le port. */
+  stop: () => Promise<void>;
+};
+
+/**
+ * Démarre l'app et la LAISSE tourner (contrairement à `runSmoke` qui teste puis tue).
+ * C'est le harnais des probes serveur (§2.5) : démarrer UNE fois, lancer toutes les
+ * probes `http`/`browser` contre l'app vivante, puis l'arrêter. Sert aussi aux probes
+ * `process` (un démon qui doit tenir debout).
+ *
+ * Prêt = réponse HTTP sur `url`, sinon (démon sans HTTP) une ligne de log qui
+ * correspond à `logMatch`. Sans l'un ni l'autre, on considère l'app levée après un
+ * court délai (best-effort). Réutilise `killByPort`/`killTree`/`waitForUrl` du smoke.
+ */
+export async function startApp(
+  dir: string,
+  cfg: { start: string; url?: string; logMatch?: string; readyTimeoutMs?: number },
+): Promise<{ server: StartedApp } | { error: string }> {
+  const ready = cfg.readyTimeoutMs ?? 30_000;
+  const port = cfg.url ? portFromUrl(cfg.url) : null;
+  if (port) await killByPort(port); // serveur fantôme d'une itération précédente
+
+  let logs = "";
+  const child = execa(cfg.start, {
+    cwd: dir,
+    shell: true,
+    reject: false,
+    all: true,
+    detached: process.platform !== "win32",
+    env: { ...process.env, FORCE_COLOR: "0" },
+  });
+  child.all?.on("data", (d: Buffer) => {
+    logs += d.toString();
+    if (logs.length > 8000) logs = logs.slice(-8000);
+  });
+  child.catch(() => {}); // un kill n'est pas une erreur
+
+  const stop = async () => {
+    await killTree(child);
+    if (port) await killByPort(port);
+  };
+
+  let up = false;
+  if (cfg.url) up = (await waitForUrl(cfg.url, ready)).up;
+  else if (cfg.logMatch) up = await waitForLog(() => logs, cfg.logMatch, ready);
+  else {
+    await sleep(Math.min(ready, 1500));
+    up = true;
+  }
+
+  if (!up) {
+    await stop();
+    const how = cfg.url ? `réponse sur ${cfg.url}` : `log « ${cfg.logMatch} »`;
+    return { error: `pas de ${how} en ${ready / 1000}s\n--- logs ---\n${logs.slice(-1500)}` };
+  }
+  return { server: { baseUrl: cfg.url ?? "", logs: () => logs, stop } };
+}
+
 /** Écrit code + tests dans un sandbox et lance les garde-fous fournis (config projet). */
 export async function runGuardrails(
   files: FileSpec[],

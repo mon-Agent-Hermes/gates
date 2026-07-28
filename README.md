@@ -97,12 +97,33 @@ npm test            # vitest (38 tests, dont un vrai navigateur si Chrome prése
 probe** (`init-cree-la-config : fichier attendu absent`), pas le check. `stdout`/`stderr`
 acceptent une regex slashée (`"/…/"`) ou une sous-chaîne littérale.
 
+### Probes serveur — `http`, `browser`, `process`
+
+Les probes `http` et `browser` sondent l'**app démarrée par le harnais** (déclarée dans
+`app`, démarrée une fois puis arrêtée). `process` lance son propre démon et vérifie qu'il
+tient debout (réponse HTTP sur `url`, ou ligne de log `logMatch`).
+
+```json
+"probes": [
+  { "id": "liste", "criterion": "AC-7", "kind": "http",
+    "request": { "method": "GET", "path": "/tasks" },
+    "expect": { "statusNot": [404, 500], "bodyMatch": "[" } },
+
+  { "id": "selection-puis-arene", "criterion": "AC-1", "kind": "browser",
+    "path": "/", "actions": [{ "click": "#choix-guerrier" }, { "wait": 300 }],
+    "expect": { "requireCanvas": true, "minDrawCalls": 1, "requireSelectors": ["#hud"] } },
+
+  { "id": "worker-demarre", "criterion": "AC-5", "kind": "process",
+    "start": "node worker.mjs", "logMatch": "/ready/i", "readyTimeoutMs": 8000 }
+]
+```
+
 ## Non encore porté (viendra ensuite)
 
-- **Probes `browser` / `http` / `process`** : elles exigent l'app démarrée ; leur harnais
-  suit la généralisation de `runSmoke`. D'ici là elles sont `skipped` (jamais un faux vert).
-- **`coverage` (§2.6)** — atteignabilité **par exécution** (lancer les probes sous
-  couverture V8/CDP, échouer sur tout livrable à 0 ligne exécutée).
+- **`coverage` (§2.6)** — atteignabilité **par exécution** : lancer les probes sous
+  couverture (`NODE_V8_COVERAGE` côté Node, `Profiler.takePreciseCoverage` par CDP côté
+  navigateur) et échouer sur tout livrable à 0 ligne exécutée. Dépend du harnais de probes,
+  désormais en place.
 
 Déjà couvert : commandes déclarées, livrables, assemblage statique, smoke (routes +
-rendu), **probes `cli`/`artifact`**, **spec-coverage**.
+rendu), **probes `cli` / `artifact` / `http` / `browser` / `process`**, **spec-coverage**.
