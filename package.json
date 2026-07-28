@@ -1,0 +1,32 @@
+{
+  "name": "gates",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Garde-fous déterministes autonomes : assemblage, rendu, endpoints, smoke. Le juge que l'agent ne peut pas truquer.",
+  "scripts": {
+    "gates": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "execa": "^9.5.2",
+    "puppeteer-core": "^25.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.9"
+  },
+  "bin": {
+    "gates": "bin/gates.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ]
+}
