@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runGuardrailsInDir, runInstall, runSmoke, checkDeliverables, type SmokeConfig } from "./sandbox";
 import { analyzeReachability } from "./reachability";
+import { runProbes, aggregateProbes, type Probe } from "./probes";
+import { parseAcceptanceCriteria } from "./spec";
+import { checkSpecCoverage } from "./spec-coverage";
 import type { PageRequirements } from "./page-check";
 import type { CheckResult } from "./types";
 import { buildReport, renderText, type GatesReport } from "./report";
@@ -25,6 +28,10 @@ export type GatesConfig = {
     page?: PageRequirements;
   };
   deliverables?: string[];
+  /** Scénarios d'observation de l'artefact (§2.5). */
+  probes?: Probe[];
+  /** Fichier des critères d'acceptation pour `spec-coverage` (défaut `spec.md`). */
+  specFile?: string;
 };
 
 async function loadConfig(dir: string): Promise<GatesConfig | null> {
@@ -105,6 +112,29 @@ export async function check(
       page: cfg.app.page,
     };
     checks.push(await runSmoke(dir, smoke, cfg.app.readyTimeoutMs ?? 30_000));
+  }
+
+  // 6. Probes : l'artefact fait-il son travail ? (cli/artifact ; §2.5)
+  if (want("probes") && cfg.probes?.length) {
+    checks.push(aggregateProbes(await runProbes(cfg.probes)));
+  }
+
+  // 7. spec-coverage : tout AC-n a sa probe, toute probe vise un AC-n réel (§2.7).
+  if (want("spec-coverage")) {
+    const specText = await readFile(resolve(dir, cfg.specFile ?? "spec.md"), "utf8").catch(() => null);
+    const probeCriteria = (cfg.probes ?? []).map((p) => p.criterion);
+    const hasCriteria = probeCriteria.some(Boolean);
+    if (specText === null && !hasCriteria) {
+      checks.push({ name: "spec-coverage", status: "skipped", reason: "not-configured", output: "aucune spec.md ni critère de probe" });
+    } else {
+      const criteria = specText ? parseAcceptanceCriteria(specText) : [];
+      const r = checkSpecCoverage(criteria, probeCriteria);
+      checks.push(
+        r.ok
+          ? { name: "spec-coverage", status: "passed", output: `${criteria.length} critère(s), tous couverts par une probe` }
+          : { name: "spec-coverage", status: "failed", output: r.reasons.join("\n") },
+      );
+    }
   }
 
   const report = buildReport(checks);
