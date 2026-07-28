@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runGuardrailsInDir, runInstall, runSmoke, checkDeliverables, type SmokeConfig } from "./sandbox";
+import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions } from "./sandbox";
 import { analyzeReachability } from "./reachability";
-import { runProbes, aggregateProbes, type Probe } from "./probes";
+import { runProbesAgainst, aggregateProbes, type Probe } from "./probes";
 import { parseAcceptanceCriteria } from "./spec";
 import { checkSpecCoverage } from "./spec-coverage";
 import type { PageRequirements } from "./page-check";
@@ -102,25 +102,41 @@ export async function check(
     }
   }
 
-  // 5. Smoke : l'app démarre, répond, sert ses routes déclarées et rend sa page.
-  if (want("smoke") && cfg.app?.start && cfg.app?.url) {
-    const smoke: SmokeConfig = {
-      cmd: cfg.app.start,
-      url: cfg.app.url,
-      readyTimeoutMs: cfg.app.readyTimeoutMs,
-      paths: cfg.app.paths,
-      page: cfg.app.page,
-    };
-    checks.push(await runSmoke(dir, smoke, cfg.app.readyTimeoutMs ?? 30_000));
-  }
-
-  // 6. Probes : l'artefact fait-il son travail ? (§2.5). Les http/browser sondent
-  //    l'app démarrée par le harnais (déclarée dans `app`).
-  if (want("probes") && cfg.probes?.length) {
-    const app = cfg.app?.start && cfg.app?.url
+  // 5+6. App partagée : le check `smoke` ET les probes `http`/`browser` sondent la
+  //      MÊME instance, démarrée UNE SEULE fois par le harnais puis arrêtée (au lieu
+  //      d'un démarrage pour smoke + un autre pour les probes).
+  {
+    const appCfg = cfg.app?.start && cfg.app?.url
       ? { start: cfg.app.start, url: cfg.app.url, readyTimeoutMs: cfg.app.readyTimeoutMs }
-      : undefined;
-    checks.push(aggregateProbes(await runProbes(cfg.probes, { dir, app })));
+      : null;
+    const wantSmoke = want("smoke") && !!appCfg;
+    const wantProbes = want("probes") && !!cfg.probes?.length;
+    const hasServerProbes = (cfg.probes ?? []).some((p) => p.kind === "http" || p.kind === "browser");
+    const needStart = !!appCfg && (wantSmoke || (wantProbes && hasServerProbes));
+
+    if (needStart && appCfg) {
+      const started = await startApp(dir, appCfg);
+      if ("error" in started) {
+        if (wantSmoke) checks.push({ name: "smoke", status: "failed", output: `l'appli n'a pas démarré.\nCommande : ${appCfg.start}\n${started.error}` });
+        if (wantProbes) checks.push(aggregateProbes(await runProbesAgainst(cfg.probes!, { dir })));
+      } else {
+        try {
+          if (wantSmoke) {
+            checks.push(await smokeAssertions(started.server.baseUrl, {
+              paths: cfg.app!.paths, page: cfg.app!.page, cmd: appCfg.start, startLogs: started.server.logs(),
+            }));
+          }
+          if (wantProbes) {
+            checks.push(aggregateProbes(await runProbesAgainst(cfg.probes!, { dir, baseUrl: started.server.baseUrl })));
+          }
+        } finally {
+          await started.server.stop();
+        }
+      }
+    } else if (wantProbes) {
+      // Aucun serveur à démarrer : seulement des probes autonomes (cli/artifact/process).
+      checks.push(aggregateProbes(await runProbesAgainst(cfg.probes!, { dir })));
+    }
   }
 
   // 7. spec-coverage : tout AC-n a sa probe, toute probe vise un AC-n réel (§2.7).

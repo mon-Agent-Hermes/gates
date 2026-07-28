@@ -252,80 +252,69 @@ async function killTree(child: ResultPromise): Promise<void> {
   }
 }
 
-export async function runSmoke(dir: string, smoke: SmokeConfig, timeoutMs = 30_000): Promise<CheckResult> {
-  const ready = smoke.readyTimeoutMs ?? timeoutMs;
-  const port = portFromUrl(smoke.url);
-  // Libère le port d'un éventuel serveur fantôme (itération/lot précédent) avant
-  // de démarrer, sinon EADDRINUSE ferait échouer ce smoke à tort.
-  if (port) await killByPort(port);
-  let logs = "";
-  const child = execa(smoke.cmd, {
-    cwd: dir,
-    shell: true,
-    reject: false,
-    all: true,
-    detached: process.platform !== "win32", // groupe de process tuable sur posix
-    env: { ...process.env, FORCE_COLOR: "0" },
-  });
-  child.all?.on("data", (d: Buffer) => {
-    logs += d.toString();
-    if (logs.length > 8000) logs = logs.slice(-8000);
-  });
-  child.catch(() => {}); // un kill n'est pas une erreur
+/**
+ * Assertions de smoke SUR une app DÉJÀ démarrée (sa disponibilité a été confirmée par
+ * `startApp`) : rendu de page (front) puis routes déclarées servies. Isolé de `runSmoke`
+ * pour pouvoir partager UNE seule instance entre le check `smoke` et les probes serveur
+ * (plus de double démarrage).
+ */
+export async function smokeAssertions(
+  baseUrl: string,
+  opts: { paths?: string[]; page?: PageRequirements; cmd?: string; startLogs?: string } = {},
+): Promise<CheckResult> {
+  const started = `démarré : ${baseUrl} a répondu`;
+  const logs = opts.startLogs ?? "";
+  const cmdNote = opts.cmd ? `\nCommande : ${opts.cmd}` : "";
 
-  try {
-    const res = await waitForUrl(smoke.url, ready);
-    if (res.up) {
-      const started = `démarré : ${smoke.url} a répondu (HTTP ${res.status})`;
-
-      // Front : « répond 200 » ne veut rien dire tant qu'on n'a pas regardé la page.
-      // Le contrôle de page ouvre un vrai navigateur et exige un rendu (cf. page-check).
-      if (smoke.page) {
-        const pc = await runPageCheck(smoke.url, smoke.page);
-        if (pc.status === "failed") {
-          return {
-            name: "smoke",
-            status: "failed",
-            output: `l'appli démarre mais la PAGE ne rend pas correctement.\n${pc.output}\n` +
-              `Commande : ${smoke.cmd}\n--- logs de démarrage ---\n${logs.slice(-2000)}`,
-          };
-        }
-        const note = pc.status === "skipped" ? `contrôle de page ignoré (${pc.output})` : pc.output;
-        const declaredPaths = (smoke.paths ?? []).filter(Boolean);
-        if (!declaredPaths.length) return { name: "smoke", status: "passed", output: `${started} ; ${note}` };
-      }
-
-      const declared = (smoke.paths ?? []).filter(Boolean);
-      if (!declared.length) return { name: "smoke", status: "passed", output: started };
-
-      // L'appli démarre : sert-elle les routes DÉCLARÉES ? (angle mort d'intégration)
-      const probes = await probePaths(smoke.url, declared);
-      const detail = probes.map((p) => `${p.path} → ${p.status ?? "aucune réponse"}`).join(", ");
-      const missing = probes.filter((p) => !p.ok);
-      if (missing.length) {
-        return {
-          name: "smoke",
-          status: "failed",
-          output:
-            `l'appli démarre mais ne sert PAS les routes déclarées : ${missing.map((p) => p.path).join(", ")}.\n` +
-            `Un 404 ici = route jamais montée sur l'application réellement lancée (racine de composition) — ` +
-            `monte-la à l'endroit que la commande de démarrage lance, ne crée pas d'application parallèle.\n` +
-            `Sondes : ${detail}\nCommande : ${smoke.cmd}\n--- logs de démarrage ---\n${logs.slice(-2000)}`,
-        };
-      }
-      return { name: "smoke", status: "passed", output: `${started} ; routes déclarées servies (${detail})` };
+  // Front : « répond 200 » ne veut rien dire tant qu'on n'a pas regardé la page.
+  if (opts.page) {
+    const pc = await runPageCheck(baseUrl, opts.page);
+    if (pc.status === "failed") {
+      return {
+        name: "smoke",
+        status: "failed",
+        output: `l'appli démarre mais la PAGE ne rend pas correctement.\n${pc.output}${cmdNote}\n--- logs ---\n${logs.slice(-2000)}`,
+      };
     }
+    const note = pc.status === "skipped" ? `contrôle de page ignoré (${pc.output})` : pc.output;
+    if (!(opts.paths ?? []).filter(Boolean).length) return { name: "smoke", status: "passed", output: `${started} ; ${note}` };
+  }
+
+  const declared = (opts.paths ?? []).filter(Boolean);
+  if (!declared.length) return { name: "smoke", status: "passed", output: started };
+
+  // L'appli démarre : sert-elle les routes DÉCLARÉES ? (angle mort d'intégration)
+  const probes = await probePaths(baseUrl, declared);
+  const detail = probes.map((p) => `${p.path} → ${p.status ?? "aucune réponse"}`).join(", ");
+  const missing = probes.filter((p) => !p.ok);
+  if (missing.length) {
     return {
       name: "smoke",
       status: "failed",
-      output: `l'appli n'a pas répondu sur ${smoke.url} en ${ready / 1000}s (démarrage échoué ?).\n` +
-        `Commande : ${smoke.cmd}\n--- logs de démarrage ---\n${logs.slice(-2500)}`,
+      output:
+        `l'appli démarre mais ne sert PAS les routes déclarées : ${missing.map((p) => p.path).join(", ")}.\n` +
+        `Un 404 ici = route jamais montée sur l'application réellement lancée (racine de composition) — ` +
+        `monte-la à l'endroit que la commande de démarrage lance, ne crée pas d'application parallèle.\n` +
+        `Sondes : ${detail}${cmdNote}`,
     };
+  }
+  return { name: "smoke", status: "passed", output: `${started} ; routes déclarées servies (${detail})` };
+}
+
+/**
+ * Garde-fou `smoke` autonome : démarre l'app, confirme qu'elle répond, joue les
+ * assertions, puis l'arrête. Quand des probes serveur coexistent, l'appelant partage
+ * plutôt un seul `startApp` + `smokeAssertions` (cf. cli.ts) pour ne pas démarrer deux fois.
+ */
+export async function runSmoke(dir: string, smoke: SmokeConfig, timeoutMs = 30_000): Promise<CheckResult> {
+  const started = await startApp(dir, { start: smoke.cmd, url: smoke.url, readyTimeoutMs: smoke.readyTimeoutMs ?? timeoutMs });
+  if ("error" in started) {
+    return { name: "smoke", status: "failed", output: `l'appli n'a pas répondu (démarrage échoué ?).\nCommande : ${smoke.cmd}\n${started.error}` };
+  }
+  try {
+    return await smokeAssertions(started.server.baseUrl, { paths: smoke.paths, page: smoke.page, cmd: smoke.cmd, startLogs: started.server.logs() });
   } finally {
-    await killTree(child);
-    // Filet : si l'arbre a laissé un enfant (reloader uvicorn, wrapper shell…),
-    // on libère quand même le port pour ne pas polluer l'itération suivante.
-    if (port) await killByPort(port);
+    await started.server.stop();
   }
 }
 

@@ -291,13 +291,14 @@ export async function runProbe(p: Probe, timeoutMs = 120_000, dir = process.cwd(
 }
 
 /**
- * Lance toutes les probes. Les `http`/`browser` partagent une app démarrée UNE fois
- * (le harnais) puis arrêtée ; les autres tournent en autonome. L'ordre de sortie
- * suit l'ordre d'entrée.
+ * Lance toutes les probes contre une app DÉJÀ démarrée (ou aucune). Ne gère PAS le
+ * cycle de vie du serveur : `baseUrl` est fourni par l'appelant, qui l'a démarré et
+ * l'arrêtera. C'est ce qui permet de partager une seule instance entre `smoke` et les
+ * probes serveur (cf. cli.ts). L'ordre de sortie suit l'ordre d'entrée.
  */
-export async function runProbes(
+export async function runProbesAgainst(
   probes: Probe[],
-  opts: { dir?: string; app?: ProbeAppConfig; timeoutMs?: number } = {},
+  opts: { dir?: string; baseUrl?: string; timeoutMs?: number } = {},
 ): Promise<ProbeResult[]> {
   const dir = opts.dir ?? process.cwd();
   const timeoutMs = opts.timeoutMs ?? 120_000;
@@ -312,32 +313,47 @@ export async function runProbes(
     else if (p.kind !== "http" && p.kind !== "browser") results[i] = skip(p, `kind « ${p.kind} » inconnu`);
   }
 
-  // 2. Probes serveur (http, browser) : app partagée démarrée une fois.
+  // 2. Probes serveur (http, browser) : contre l'app déjà démarrée.
   const serverProbes = probes.map((p, i) => ({ p, i })).filter((x) => x.p.kind === "http" || x.p.kind === "browser");
-  if (serverProbes.length) {
-    if (!opts.app?.start || !opts.app?.url) {
-      for (const { p, i } of serverProbes) {
-        results[i] = fail(p, "probe serveur mais aucun app.start/url déclaré pour lancer le serveur");
-      }
-    } else {
-      const started = await startApp(dir, opts.app);
-      if ("error" in started) {
-        for (const { p, i } of serverProbes) results[i] = fail(p, `l'app n'a pas démarré : ${started.error}`);
-      } else {
-        try {
-          for (const { p, i } of serverProbes) {
-            results[i] = p.kind === "http"
-              ? await runHttpProbe(p as HttpProbe, started.server.baseUrl)
-              : await runBrowserProbe(p as BrowserProbe, started.server.baseUrl);
-          }
-        } finally {
-          await started.server.stop();
-        }
-      }
+  for (const { p, i } of serverProbes) {
+    if (!opts.baseUrl) {
+      results[i] = fail(p, "aucun app.start/url démarré : impossible de lancer la probe serveur");
+      continue;
     }
+    results[i] = p.kind === "http"
+      ? await runHttpProbe(p as HttpProbe, opts.baseUrl)
+      : await runBrowserProbe(p as BrowserProbe, opts.baseUrl);
   }
 
   return results.map((r, i) => r ?? skip(probes[i], "non exécutée"));
+}
+
+/**
+ * Lance toutes les probes en gérant le cycle de vie : si des probes serveur existent et
+ * qu'une `app` est fournie, démarre l'app UNE fois, sonde, puis l'arrête. Sinon délègue
+ * à `runProbesAgainst` (probes autonomes ; les serveur échouent faute d'app). Entrée
+ * autonome pratique ; cli.ts, lui, partage l'app avec `smoke` via `runProbesAgainst`.
+ */
+export async function runProbes(
+  probes: Probe[],
+  opts: { dir?: string; app?: ProbeAppConfig; timeoutMs?: number } = {},
+): Promise<ProbeResult[]> {
+  const hasServer = probes.some((p) => p.kind === "http" || p.kind === "browser");
+  if (hasServer && opts.app?.start && opts.app?.url) {
+    const started = await startApp(opts.dir ?? process.cwd(), opts.app);
+    if ("error" in started) {
+      const base = await runProbesAgainst(probes, { dir: opts.dir, timeoutMs: opts.timeoutMs });
+      return probes.map((p, i) =>
+        p.kind === "http" || p.kind === "browser" ? fail(p, `l'app n'a pas démarré : ${started.error}`) : base[i],
+      );
+    }
+    try {
+      return await runProbesAgainst(probes, { dir: opts.dir, baseUrl: started.server.baseUrl, timeoutMs: opts.timeoutMs });
+    } finally {
+      await started.server.stop();
+    }
+  }
+  return runProbesAgainst(probes, { dir: opts.dir, timeoutMs: opts.timeoutMs });
 }
 
 /** Agrège les probes en un seul CheckResult (un skipped ne bloque pas ; un failed oui). */
