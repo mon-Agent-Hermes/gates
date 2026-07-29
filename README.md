@@ -79,7 +79,7 @@ Absent → gate `skipped` (jamais un faux rouge). En CI, on installe Chrome et o
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest (114 tests, dont un vrai navigateur si Chrome présent)
+npm test            # vitest (107 tests, dont un vrai navigateur si Chrome présent)
 ```
 
 ## Probes (§2.5)
@@ -193,7 +193,7 @@ satisfait.
 Commandes déclarées · livrables · assemblage statique · smoke (routes + rendu) ·
 probes **`cli` / `artifact` / `http` / `browser` / `process`** · **spec-coverage** ·
 **coverage** (node/python/go/custom) · verdict par critère · harnais serveur (app
-partagée, un seul démarrage). **114 tests verts.**
+partagée, un seul démarrage). **107 tests verts.**
 
 Validé de bout en bout sur trois types de projets — CLI, générateur d'artefact, service
 HTTP — plus un projet **Python** réel (`assembly` skipped, `coverage` rouge en nommant le
