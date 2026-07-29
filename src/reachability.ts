@@ -47,6 +47,8 @@ export type ReachabilityReport = {
   unreachable: string[];
   /** false = projet hors périmètre d'analyse (pas de verdict, jamais bloquant). */
   conclusive: boolean;
+  /** true = `gates.json` déclare un point d'entrée qui n'existe pas → ÉCHEC, pas skip. */
+  configError?: boolean;
   note: string;
 };
 
@@ -115,8 +117,18 @@ function resolveRef(projectDir: string, fromFile: string, spec: string): string 
   return candidates.find((c) => existsSync(c)) ?? null;
 }
 
-/** Points d'entrée : d'abord ceux que l'HTML désigne, sinon les noms conventionnels. */
-async function findEntries(projectDir: string): Promise<string[]> {
+/**
+ * Points d'entrée. Un `entry` DÉCLARÉ dans `gates.json` fait autorité (on déclare, on ne
+ * devine pas — défaut n°5) ; à défaut, on retombe sur ce que l'HTML désigne, puis sur les
+ * noms conventionnels. Un `entry` déclaré mais introuvable est une ERREUR, pas une
+ * invitation à deviner : c'est exactement la façon dont une exigence se décroche en
+ * silence de sa vérification.
+ */
+async function findEntries(projectDir: string, declared?: string): Promise<string[] | { error: string }> {
+  if (declared) {
+    const p = resolve(projectDir, declared);
+    return existsSync(p) ? [p] : { error: `point d'entrée déclaré introuvable : ${declared}` };
+  }
   const html = ["index.html", join("src", "index.html"), join("public", "index.html")]
     .map((p) => resolve(projectDir, p))
     .filter((p) => existsSync(p));
@@ -134,10 +146,14 @@ async function findEntries(projectDir: string): Promise<string[]> {
  * Parcourt le graphe depuis les points d'entrée et renvoie les livrables jamais atteints.
  * `roots` : dossiers de livrables à contrôler (défaut `src/`).
  */
-export async function analyzeReachability(projectDir: string, roots = ["src"]): Promise<ReachabilityReport> {
+export async function analyzeReachability(projectDir: string, roots = ["src"], entry?: string): Promise<ReachabilityReport> {
   try {
-    const entries = await findEntries(projectDir);
+    const found = await findEntries(projectDir, entry);
     const rel = (p: string) => relative(projectDir, p).replace(/\\/g, "/");
+    if (!Array.isArray(found)) {
+      return { entries: [], scanned: 0, unreachable: [], conclusive: false, note: found.error, configError: true };
+    }
+    const entries = found;
     if (!entries.length) {
       return { entries: [], scanned: 0, unreachable: [], conclusive: false, note: "aucun point d'entrée web identifié — pas de verdict" };
     }

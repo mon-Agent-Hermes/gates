@@ -57,6 +57,8 @@ navigateur classé « API HTTP » parce que la spec contenait le mot *server*).
 | `requiredCommands` | — | un gate requis dont l'outil est **absent** = échec, pas « skipped » |
 | `deliverables` | `deliverables` | fichiers qui doivent exister (ferme le « coder-fantôme ») |
 | `roots` | `assembly` | dossiers de livrables à contrôler (défaut `src`) |
+| `entry` | `assembly` | point d'entrée déclaré ; déclaré mais introuvable = **échec**, pas de repli silencieux |
+| `coverage` | `coverage` | atteignabilité par exécution, tous runtimes (voir plus bas) |
 | `app.start`+`url` | `smoke` | l'app démarre et répond ; `paths` = routes qui ne doivent pas répondre 404 |
 | `app.page` | `smoke` | rendu réel dans Chrome headless (canvas, appels de dessin, erreurs console) |
 | `probes` | `probes` | scénarios d'observation de l'artefact (kinds `cli`, `artifact`) — `$TMP` neuf par probe |
@@ -77,7 +79,7 @@ Absent → gate `skipped` (jamais un faux rouge). En CI, on installe Chrome et o
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest (38 tests, dont un vrai navigateur si Chrome présent)
+npm test            # vitest (111 tests, dont un vrai navigateur si Chrome présent)
 ```
 
 ## Probes (§2.5)
@@ -122,28 +124,77 @@ Le check `smoke` et les probes `http`/`browser` partagent **une seule** instance
 `app` et des probes serveur coexistent, l'app est démarrée **une fois** puis arrêtée (pas
 un démarrage par check).
 
-## En cours — `coverage` (§2.6)
+## `coverage` — atteignabilité **par exécution** (§2.6)
 
-Atteignabilité **par exécution** : lancer les probes sous couverture et échouer sur tout
-livrable jamais exécuté (« mort ou vivant », seuil ≥ 1 ligne, pas un pourcentage).
-Strictement plus fort que l'assemblage statique — un module importé mais dont le code
-n'est jamais atteint passe l'assemblage et échoue ici.
+C'est le gate qui fait sortir le montage du web. L'assemblage statique ne conclut que
+sur un graphe d'imports JS/HTML : sur un projet Python, Go, un CLI ou un service sans
+front, il sort `skipped` — **le gate qui avait trouvé les 29 fichiers morts n'existe pas
+pour la majorité des projets.** La couverture pose la même question sans graphe :
 
-**État : amorcé, PAS encore câblé ni validé.**
-- ✅ écrit : `src/coverage.ts` (lecture des rapports `NODE_V8_COVERAGE`, glob
-  `requireExecuted`/`allowUnexecuted`, verdict) + instrumentation des probes `cli`/`artifact`
-  (variable `covDir` transmise à leur process Node).
-- ⬜ reste : câbler dans `gates check` (créer le dossier de couverture, le passer aux
-  probes, agréger le verdict), **écrire les tests**, valider en bout-en-bout (§8 point 3 :
-  `assembly` vert + `coverage` rouge sur un fichier atteignable mais jamais exécuté).
-- ⬜ hors périmètre du jet Node : couverture navigateur (`Profiler.takePreciseCoverage`
-  par CDP + source maps) et serveur (un process tué ne vide pas sa couverture V8).
+> Ce fichier s'est-il exécuté quand on a piloté l'artefact comme un utilisateur ?
 
-> Le module `coverage.ts` n'est encore appelé par personne : il compile mais n'est pas
-> testé. À reprendre là avant tout autre chantier.
+```json
+"coverage": {
+  "runtime": "node",
+  "requireExecuted": ["src/**/*.ts"],
+  "allowUnexecuted": ["src/types.ts", "src/**/*.d.ts"]
+}
+```
 
-## Déjà porté et validé
+**Vivant = quelque chose s'est exécuté au-delà des déclarations**, pas « ≥ 1 ligne ».
+La nuance est ce qui rend le gate plus fort que l'assemblage : importer un module
+exécute son corps (en JS comme en Python), donc compter les lignes reviendrait à
+recompter « ce fichier est importé ». Un module chargé dont aucune fonction n'est
+appelée est signalé pour ce qu'il est :
+
+```
+✗ coverage — failed
+    2 livrable(s) jamais exercé(s) pendant les probes.
+    Jamais atteint : src/mort.py
+    Chargé mais aucune de ses fonctions n'a été appelée : src/aide.py
+```
+
+Le seuil reste **mort ou vivant**, jamais un pourcentage : un objectif de couverture
+chiffré est une métrique gameable qui transformerait un juge en rituel.
+
+### Runtimes
+
+Chaque runtime n'apporte que trois choses : ce qu'on injecte, ce qu'on lance après, ce
+qu'on lit. `$COV` (le dossier de mesure) est utilisable dans les commandes de probe.
+
+| `runtime` | Injecté | Le projet doit | Format lu |
+|---|---|---|---|
+| `node` (défaut) | `NODE_V8_COVERAGE` | rien (natif) | V8 |
+| `python` | `COVERAGE_FILE` | lancer ses probes via `python -m coverage run --parallel-mode …` | `coverage json` |
+| `go` | `GOCOVERDIR` | construire avec `go build -cover` | `go tool covdata textfmt` |
+| `custom` | `env` déclaré | fournir `report` + `format` (`lcov` couvre grcov, jacoco, phpunit…) | au choix |
+
+### Ce qui n'est pas mesuré (et le dit)
+
+- **Serveurs** : un process tué de force ne déroule pas ses hooks de sortie, donc n'écrit
+  rien. L'app doit gérer `SIGTERM` et sortir proprement. `gates` **constate** (comptage
+  des fichiers de mesure avant/après) et **suspend** le verdict au lieu de rendre un faux
+  rouge sur du code qu'il n'a pas su observer.
+- **Windows** : pas d'arrêt propre pour un process console → la couverture serveur n'est
+  mesurable que sous POSIX (VPS et CI Linux).
+- **Navigateur** : non instrumenté (exige CDP + source maps). Signalé comme mesure
+  incomplète, jamais compté comme du code mort.
+
+## Verdict par critère
+
+Le JSON et la sortie texte portent un bloc `criteria` : l'état de chaque `AC-n`, qui est
+ce que la skill `/verify` doit rapporter (`AC-3 ❌ · AC-9 non couvert`), pas
+`probes: failed`. Trois états, et **`uncovered` compte comme un échec** — un critère dont
+la seule probe a été ignorée (pas de Chrome sur la machine) n'est pas un critère
+satisfait.
+
+## Portée et validation
 
 Commandes déclarées · livrables · assemblage statique · smoke (routes + rendu) ·
 probes **`cli` / `artifact` / `http` / `browser` / `process`** · **spec-coverage** ·
-harnais serveur (app partagée, un seul démarrage). **62 tests verts.**
+**coverage** (node/python/go/custom) · verdict par critère · harnais serveur (app
+partagée, un seul démarrage). **111 tests verts.**
+
+Validé de bout en bout sur trois types de projets — CLI, générateur d'artefact, service
+HTTP — plus un projet **Python** réel (`assembly` skipped, `coverage` rouge en nommant le
+module jamais importé et celui importé sans jamais servir).

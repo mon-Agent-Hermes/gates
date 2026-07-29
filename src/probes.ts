@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { startApp, probeUrl } from "./sandbox";
 import { observePage, classifyPage, type PageRequirements, type PageAction } from "./page-check";
+import { countCoverageFiles, noteServerCoverage, type CoverageContext } from "./coverage";
 import type { CheckResult } from "./types";
+
+export type { CoverageContext };
 
 /**
  * `probes` (§2.5) — observer l'artefact EN TRAIN de faire son travail, au niveau où
@@ -112,9 +115,10 @@ export type ProbeResult = {
 /** Config de l'app partagée que démarrent les probes `http`/`browser`. */
 export type ProbeAppConfig = { start: string; url: string; readyTimeoutMs?: number };
 
-/** Remplace `$TMP` par le dossier jetable de la probe. */
-function expand(s: string, tmp: string): string {
-  return s.split("$TMP").join(tmp);
+/** Remplace `$TMP` (dossier jetable de la probe) et `$COV` (dossier de mesure). */
+function expand(s: string, tmp: string, cov?: CoverageContext): string {
+  const withTmp = s.split("$TMP").join(tmp);
+  return cov ? withTmp.split("$COV").join(cov.dir) : withTmp;
 }
 
 /**
@@ -139,27 +143,29 @@ const skip = (p: { id: string; criterion?: string }, output: string): ProbeResul
 
 // ── Probes autonomes (aucun serveur) ────────────────────────────────────────────
 
-async function runCliProbe(p: CliProbe, timeoutMs: number, covDir?: string): Promise<ProbeResult> {
+async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: CoverageContext): Promise<ProbeResult> {
   const tmp = await mkdtemp(join(tmpdir(), "gates-probe-"));
   const reasons: string[] = [];
   try {
     const exp = p.expect ?? {};
-    const res = await execa(expand(p.run, tmp), {
+    const res = await execa(expand(p.run, tmp, cov), {
+      cwd: dir, // la probe s'exécute DANS le projet, pas dans le dossier d'où `gates` est lancé
       shell: true, reject: false, all: true, timeout: timeoutMs,
-      // NODE_V8_COVERAGE : le process Node écrit sa couverture ici à la sortie (§2.6).
-      env: covDir ? { NODE_V8_COVERAGE: covDir } : undefined,
+      // Instrumentation du runtime déclaré (§2.6) : le process écrit sa couverture
+      // dans `$COV` à sa sortie — d'où l'exigence d'une sortie PROPRE.
+      env: cov?.env,
     });
     if (exp.exitCode !== undefined && res.exitCode !== exp.exitCode) {
       reasons.push(`code de sortie ${res.exitCode} (attendu ${exp.exitCode})`);
     }
-    if (exp.stdout && !textMatches(expand(exp.stdout, tmp), res.stdout ?? "")) {
+    if (exp.stdout && !textMatches(expand(exp.stdout, tmp, cov), res.stdout ?? "")) {
       reasons.push(`stdout ne correspond pas à ${exp.stdout}`);
     }
-    if (exp.stderr && !textMatches(expand(exp.stderr, tmp), res.stderr ?? "")) {
+    if (exp.stderr && !textMatches(expand(exp.stderr, tmp, cov), res.stderr ?? "")) {
       reasons.push(`stderr ne correspond pas à ${exp.stderr}`);
     }
     for (const f of exp.files ?? []) {
-      const fp = expand(f, tmp);
+      const fp = expand(f, tmp, cov);
       try {
         if (!(await stat(fp)).isFile()) reasons.push(`fichier attendu non régulier : ${f}`);
       } catch {
@@ -174,16 +180,17 @@ async function runCliProbe(p: CliProbe, timeoutMs: number, covDir?: string): Pro
   return reasons.length ? fail(p, reasons.join(" ; ")) : pass(p, "effet observé (code/sortie/fichiers conformes)");
 }
 
-async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, covDir?: string): Promise<ProbeResult> {
+async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, dir: string, cov?: CoverageContext): Promise<ProbeResult> {
   const tmp = await mkdtemp(join(tmpdir(), "gates-probe-"));
   const reasons: string[] = [];
   try {
     const exp = p.expect ?? {};
-    if (p.run) await execa(expand(p.run, tmp), {
+    if (p.run) await execa(expand(p.run, tmp, cov), {
+      cwd: dir,
       shell: true, reject: false, all: true, timeout: timeoutMs,
-      env: covDir ? { NODE_V8_COVERAGE: covDir } : undefined,
+      env: cov?.env,
     });
-    const fp = expand(p.file, tmp);
+    const fp = expand(p.file, tmp, cov);
     let size = -1;
     try {
       const st = await stat(fp);
@@ -196,8 +203,8 @@ async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, covDir?: st
       reasons.push(`artefact trop petit : ${size} octet(s) (minimum ${exp.minBytes})`);
     }
     if (size >= 0 && exp.openableBy) {
-      const cmd = expand(exp.openableBy, tmp).split("{file}").join(fp);
-      const r = await execa(cmd, { shell: true, reject: false, all: true, timeout: timeoutMs });
+      const cmd = expand(exp.openableBy, tmp, cov).split("{file}").join(fp);
+      const r = await execa(cmd, { cwd: dir, shell: true, reject: false, all: true, timeout: timeoutMs });
       if (r.exitCode !== 0) reasons.push(`fichier non ouvrable par « ${exp.openableBy} » (code ${r.exitCode})`);
     }
   } catch (err: any) {
@@ -208,9 +215,12 @@ async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, covDir?: st
   return reasons.length ? fail(p, reasons.join(" ; ")) : pass(p, "artefact produit et valide");
 }
 
-async function runProcessProbe(p: ProcessProbe, dir: string): Promise<ProbeResult> {
+async function runProcessProbe(p: ProcessProbe, dir: string, cov?: CoverageContext): Promise<ProbeResult> {
   if (!p.url && !p.logMatch) return fail(p, "probe process sans `url` ni `logMatch` : aucun signal de disponibilité");
-  const started = await startApp(dir, { start: p.start, url: p.url, logMatch: p.logMatch, readyTimeoutMs: p.readyTimeoutMs ?? 15_000 });
+  const covBefore = cov ? await countCoverageFiles(cov.dir) : 0;
+  const started = await startApp(dir, {
+    start: p.start, url: p.url, logMatch: p.logMatch, readyTimeoutMs: p.readyTimeoutMs ?? 15_000, env: cov?.env,
+  });
   if ("error" in started) return fail(p, `le démon ne s'est pas levé : ${started.error}`);
   try {
     const exp = p.expect ?? {};
@@ -219,7 +229,10 @@ async function runProcessProbe(p: ProcessProbe, dir: string): Promise<ProbeResul
     }
     return pass(p, "démon levé et stable");
   } finally {
-    await started.server.stop();
+    const stopped = await started.server.stop();
+    // Un démon qui n'écrit pas sa couverture rendrait « morts » des fichiers bien
+    // vivants : on le CONSTATE (comptage avant/après) au lieu de le supposer.
+    await noteServerCoverage(cov, `la probe « ${p.id} »`, covBefore, stopped);
   }
 }
 
@@ -288,8 +301,8 @@ async function runBrowserProbe(p: BrowserProbe, baseUrl: string): Promise<ProbeR
  * Les kinds `http`/`browser` exigent l'app partagée → utiliser `runProbes`.
  */
 export async function runProbe(p: Probe, timeoutMs = 120_000, dir = process.cwd()): Promise<ProbeResult> {
-  if (p.kind === "cli") return runCliProbe(p as CliProbe, timeoutMs);
-  if (p.kind === "artifact") return runArtifactProbe(p as ArtifactProbe, timeoutMs);
+  if (p.kind === "cli") return runCliProbe(p as CliProbe, timeoutMs, dir);
+  if (p.kind === "artifact") return runArtifactProbe(p as ArtifactProbe, timeoutMs, dir);
   if (p.kind === "process") return runProcessProbe(p as ProcessProbe, dir);
   if (p.kind === "http" || p.kind === "browser") {
     return skip(p, `kind « ${p.kind} » : exige l'app partagée (passer par runProbes avec app)`);
@@ -305,19 +318,26 @@ export async function runProbe(p: Probe, timeoutMs = 120_000, dir = process.cwd(
  */
 export async function runProbesAgainst(
   probes: Probe[],
-  opts: { dir?: string; baseUrl?: string; timeoutMs?: number; covDir?: string } = {},
+  opts: { dir?: string; baseUrl?: string; timeoutMs?: number; coverage?: CoverageContext } = {},
 ): Promise<ProbeResult[]> {
   const dir = opts.dir ?? process.cwd();
   const timeoutMs = opts.timeoutMs ?? 120_000;
+  const cov = opts.coverage;
   const results: (ProbeResult | null)[] = probes.map(() => null);
 
   // 1. Probes autonomes (cli, artifact, process, inconnu).
   for (let i = 0; i < probes.length; i++) {
     const p = probes[i];
-    if (p.kind === "cli") results[i] = await runCliProbe(p as CliProbe, timeoutMs, opts.covDir);
-    else if (p.kind === "artifact") results[i] = await runArtifactProbe(p as ArtifactProbe, timeoutMs, opts.covDir);
-    else if (p.kind === "process") results[i] = await runProcessProbe(p as ProcessProbe, dir);
+    if (p.kind === "cli") results[i] = await runCliProbe(p as CliProbe, timeoutMs, dir, cov);
+    else if (p.kind === "artifact") results[i] = await runArtifactProbe(p as ArtifactProbe, timeoutMs, dir, cov);
+    else if (p.kind === "process") results[i] = await runProcessProbe(p as ProcessProbe, dir, cov);
     else if (p.kind !== "http" && p.kind !== "browser") results[i] = skip(p, `kind « ${p.kind} » inconnu`);
+  }
+
+  // Le pilotage NAVIGATEUR n'est pas encore instrumenté (il exige CDP + source maps) :
+  // les fichiers qui ne s'exécutent que là paraîtraient morts. On le signale.
+  if (cov && probes.some((p) => p.kind === "browser")) {
+    cov.incomplete.push("les probes « browser » ne sont pas instrumentées (couverture navigateur non portée)");
   }
 
   // 2. Probes serveur (http, browser) : contre l'app déjà démarrée.
@@ -343,24 +363,27 @@ export async function runProbesAgainst(
  */
 export async function runProbes(
   probes: Probe[],
-  opts: { dir?: string; app?: ProbeAppConfig; timeoutMs?: number } = {},
+  opts: { dir?: string; app?: ProbeAppConfig; timeoutMs?: number; coverage?: CoverageContext } = {},
 ): Promise<ProbeResult[]> {
   const hasServer = probes.some((p) => p.kind === "http" || p.kind === "browser");
+  const sub = { dir: opts.dir, timeoutMs: opts.timeoutMs, coverage: opts.coverage };
   if (hasServer && opts.app?.start && opts.app?.url) {
-    const started = await startApp(opts.dir ?? process.cwd(), opts.app);
+    const covBefore = opts.coverage ? await countCoverageFiles(opts.coverage.dir) : 0;
+    const started = await startApp(opts.dir ?? process.cwd(), { ...opts.app, env: opts.coverage?.env });
     if ("error" in started) {
-      const base = await runProbesAgainst(probes, { dir: opts.dir, timeoutMs: opts.timeoutMs });
+      const base = await runProbesAgainst(probes, sub);
       return probes.map((p, i) =>
         p.kind === "http" || p.kind === "browser" ? fail(p, `l'app n'a pas démarré : ${started.error}`) : base[i],
       );
     }
     try {
-      return await runProbesAgainst(probes, { dir: opts.dir, baseUrl: started.server.baseUrl, timeoutMs: opts.timeoutMs });
+      return await runProbesAgainst(probes, { ...sub, baseUrl: started.server.baseUrl });
     } finally {
-      await started.server.stop();
+      const stopped = await started.server.stop();
+      await noteServerCoverage(opts.coverage, "l'app partagée", covBefore, stopped);
     }
   }
-  return runProbesAgainst(probes, { dir: opts.dir, timeoutMs: opts.timeoutMs });
+  return runProbesAgainst(probes, sub);
 }
 
 /** Agrège les probes en un seul CheckResult (un skipped ne bloque pas ; un failed oui). */

@@ -238,18 +238,58 @@ async function killByPort(port: number): Promise<void> {
   }
 }
 
-async function killTree(child: ResultPromise): Promise<void> {
+/**
+ * Arrêt d'un arbre de process, en DEUX temps : on demande d'abord poliment, on force
+ * ensuite. Ce n'est pas de la politesse — c'est ce qui décide si la couverture (§2.6)
+ * existe pour les projets serveur.
+ *
+ * Un process tué de force ne déroule pas ses hooks de sortie : `NODE_V8_COVERAGE`
+ * n'écrit rien, `coverage.py` ne vide pas sa base. Sans arrêt propre, TOUT projet dont
+ * le code ne s'exécute que dans un serveur (API, démon, worker — la majorité de ce que
+ * l'agent produira) est invisible à la couverture. On signale donc explicitement quand
+ * l'arrêt a dû être forcé : le verdict de couverture s'en sert pour se suspendre au lieu
+ * de rendre un faux rouge.
+ *
+ * Windows n'a pas d'équivalent fiable de SIGTERM pour un process console : `taskkill /T`
+ * sans `/F` échoue le plus souvent. On tente, puis on force, et on le DIT.
+ */
+async function stopTree(child: ResultPromise, graceMs: number): Promise<{ graceful: boolean; note?: string }> {
   const pid = child.pid;
-  try {
-    if (process.platform === "win32" && pid) {
-      await execa("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => {});
-    } else if (pid) {
-      // detached:true => le process est chef de groupe ; on tue tout le groupe.
+  if (!pid) return { graceful: false, note: "process sans PID" };
+
+  const exited = child.then(() => true, () => true);
+  const waitExit = async (ms: number): Promise<boolean> =>
+    Promise.race([exited, sleep(ms).then(() => false)]);
+
+  // Windows : `taskkill /T` sans `/F` ne termine pas un process console. Inutile
+  // d'attendre le délai de grâce pour rien — on force tout de suite et on le DIT.
+  if (process.platform !== "win32") {
+    try {
+      // detached:true => le process est chef de groupe ; on signale tout le groupe.
       try { process.kill(-pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    } catch {
+      /* meilleur effort */
+    }
+    if (await waitExit(graceMs)) return { graceful: true };
+  }
+
+  try {
+    if (process.platform === "win32") {
+      await execa("taskkill", ["/pid", String(pid), "/T", "/F"], { reject: false }).catch(() => {});
+    } else {
+      try { process.kill(-pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
     }
   } catch {
     /* meilleur effort */
   }
+  await waitExit(2000);
+  return {
+    graceful: false,
+    note:
+      process.platform === "win32"
+        ? "arrêt forcé (Windows n'offre pas d'arrêt propre pour un process console)"
+        : `arrêt forcé après ${graceMs / 1000}s : le process n'a pas rendu la main sur SIGTERM`,
+  };
 }
 
 /**
@@ -345,8 +385,12 @@ export type StartedApp = {
   baseUrl: string;
   /** Logs de démarrage accumulés (tronqués). */
   logs: () => string;
-  /** Arrête l'app : tue l'arbre de process + libère le port. */
-  stop: () => Promise<void>;
+  /**
+   * Arrête l'app : demande l'arrêt, attend, force si nécessaire, libère le port.
+   * `graceful: false` signifie que le process n'a PAS déroulé ses hooks de sortie —
+   * donc qu'il n'a pas écrit sa couverture (cf. `stopTree`).
+   */
+  stop: () => Promise<{ graceful: boolean; note?: string }>;
 };
 
 /**
@@ -361,7 +405,16 @@ export type StartedApp = {
  */
 export async function startApp(
   dir: string,
-  cfg: { start: string; url?: string; logMatch?: string; readyTimeoutMs?: number },
+  cfg: {
+    start: string;
+    url?: string;
+    logMatch?: string;
+    readyTimeoutMs?: number;
+    /** Variables injectées (instrumentation de couverture, §2.6). */
+    env?: Record<string, string>;
+    /** Délai laissé au process pour s'arrêter proprement avant de forcer. */
+    graceMs?: number;
+  },
 ): Promise<{ server: StartedApp } | { error: string }> {
   const ready = cfg.readyTimeoutMs ?? 30_000;
   const port = cfg.url ? portFromUrl(cfg.url) : null;
@@ -374,7 +427,7 @@ export async function startApp(
     reject: false,
     all: true,
     detached: process.platform !== "win32",
-    env: { ...process.env, FORCE_COLOR: "0" },
+    env: { ...process.env, FORCE_COLOR: "0", ...(cfg.env ?? {}) },
   });
   child.all?.on("data", (d: Buffer) => {
     logs += d.toString();
@@ -383,8 +436,9 @@ export async function startApp(
   child.catch(() => {}); // un kill n'est pas une erreur
 
   const stop = async () => {
-    await killTree(child);
+    const res = await stopTree(child, cfg.graceMs ?? 5000);
     if (port) await killByPort(port);
+    return res;
   };
 
   let up = false;
