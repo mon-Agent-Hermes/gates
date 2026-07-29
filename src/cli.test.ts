@@ -212,6 +212,67 @@ describe("projet service HTTP (le cas majoritaire : le code ne vit que dans le s
   }, 90_000);
 });
 
+describe("critères — une exigence ne peut pas disparaître en silence (§8, point 4)", () => {
+  const projetAvecCriteres = (specAcs: string[], probeCriterion: string | null): Files => ({
+    "spec.md": `# Spec\n\n## Critères d'acceptation\n\n${specAcs.map((id) => `- **${id}** — exigence ${id}.\n`).join("")}`,
+    "src/main.mjs": `console.log("ok");\n`,
+    "gates.json": JSON.stringify({
+      entry: "src/main.mjs",
+      roots: ["src"],
+      probes: [{
+        id: "lance", kind: "cli", run: "node src/main.mjs", expect: { exitCode: 0 },
+        ...(probeCriterion ? { criterion: probeCriterion } : {}),
+      }],
+    }),
+  });
+
+  it("un AC-n sans probe → spec-coverage ROUGE et le critère marqué non vérifié", async () => {
+    const { dir, clean } = await projet(projetAvecCriteres(["AC-1", "AC-9"], "AC-1"));
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+
+      const sc = byName(r, "spec-coverage");
+      expect(sc.status, sc.output).toBe("failed");
+      expect(sc.output).toMatch(/AC-9/);
+
+      expect(r.report.criteria?.["AC-1"].status).toBe("passed");
+      expect(r.report.criteria?.["AC-9"].status).toBe("uncovered");
+      expect(r.ok).toBe(false);
+      expect(r.report.summary).toMatch(/1\/2 critère/);
+    } finally { await clean(); }
+  }, 60_000);
+
+  it("un `criterion` renommé (référence inexistante) → ROUGE des deux côtés", async () => {
+    // La probe existe et passe, mais elle ne vérifie plus rien de déclaré : l'exigence
+    // AC-1 s'est décrochée de sa vérification. C'est exactement ce que le check attrape.
+    const { dir, clean } = await projet(projetAvecCriteres(["AC-1"], "AC-10"));
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+
+      const sc = byName(r, "spec-coverage");
+      expect(sc.status, sc.output).toBe("failed");
+      expect(sc.output).toMatch(/AC-1/);   // déclaré mais plus couvert
+      expect(sc.output).toMatch(/AC-10/);  // cité mais inexistant dans la spec
+
+      expect(r.report.criteria?.["AC-1"].status).toBe("uncovered");
+      expect(r.ok).toBe(false);
+    } finally { await clean(); }
+  }, 60_000);
+
+  it("probe sans `criterion` du tout → l'AC-n déclaré reste non vérifié", async () => {
+    const { dir, clean } = await projet(projetAvecCriteres(["AC-1"], null));
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "spec-coverage").status).toBe("failed");
+      expect(r.report.criteria?.["AC-1"].status).toBe("uncovered");
+      expect(r.ok).toBe(false);
+    } finally { await clean(); }
+  }, 60_000);
+});
+
 describe("configuration", () => {
   it("point d'entrée déclaré mais introuvable → assemblage ROUGE (pas de repli silencieux)", async () => {
     const { dir, clean } = await projet({
