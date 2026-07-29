@@ -1,0 +1,91 @@
+name: gates
+
+# Le juge externe (§3.2). Ce workflow ne fait volontairement RIEN de plus que ce que
+# l'agent lance déjà en local : il rejoue `gates check`, mais depuis un clone neuf, sur
+# une machine que l'agent ne contrôle pas.
+#
+# Trois défaillances que seule cette exécution attrape, et ce sont celles qu'un agent
+# produit :
+#   1. un fichier écrit mais jamais commité — vert en local, absent du clone ;
+#   2. une différence d'environnement — la couverture d'un serveur n'est mesurable que
+#      sous POSIX, donc ce runner est STRICTEMENT plus sévère que la machine de dev ;
+#   3. un agent qui ne lance simplement pas le juge — ici, c'est le `push` qui déclenche,
+#      pas sa bonne volonté.
+#
+# ⚠️ Règle : ne rien ajouter ici que `gates check` ne fasse pas. Toute divergence
+# local/CI est un bug du montage — elle rendrait l'échec non reproductible en local,
+# donc non actionnable, et ferait boucler l'agent à l'aveugle (§3.4, règle n°1).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Un agent pousse souvent et vite : on annule le run précédent de la même branche
+# plutôt que d'empiler des runs qui consomment des minutes pour rien (§3.5).
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Le gate de rendu réutilise le navigateur de la machine (rien n'est téléchargé
+      # par puppeteer). Sans Chrome il serait `skipped` — jamais un faux rouge — mais
+      # en CI on veut qu'il tranche, donc on l'installe.
+      - name: Installer Chrome (gate de rendu)
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Dépendances
+        run: npm ci
+
+      - name: Vérification
+        env:
+          HERMES_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          set -o pipefail
+          node bin/gates.mjs check | tee gates-output.txt
+
+      # Ce que tu lis sans ouvrir les logs, et ce que la boucle rapporte dans Discord :
+      # l'état par critère d'acceptation, pas par check.
+      - name: Résumé par critère
+        if: always()
+        run: |
+          {
+            echo "## gates — ${{ github.ref_name }}"
+            echo ''
+            echo '```'
+            if [ ! -f gates-output.txt ]; then
+              echo "gates n'a produit aucune sortie (échec avant la vérification)"
+            else
+              # La plage sed va jusqu'à la fin, donc elle inclut déjà le verdict.
+              # Repli sur la dernière ligne quand le projet ne déclare aucun critère.
+              sed -n "/^Critères d'acceptation/,\$p" gates-output.txt > /tmp/crit.txt
+              if [ -s /tmp/crit.txt ]; then cat /tmp/crit.txt; else tail -n 1 gates-output.txt; fi
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Rapport complet conservé : c'est ce que Hermes récupère pour repartir en
+      # correction quand la boucle longue vire au rouge (§6.3, règle n°5).
+      - name: Conserver le rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gates-report
+          path: gates-output.txt
+          if-no-files-found: warn
+          retention-days: 14
