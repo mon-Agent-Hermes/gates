@@ -1,0 +1,6 @@
+{
+  "entry": "src/main.mjs",
+  "roots": [
+    "src"
+  ]
+}

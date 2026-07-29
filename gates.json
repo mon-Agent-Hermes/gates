@@ -1,0 +1,38 @@
+{
+  "commands": {
+    "typecheck": "npm run typecheck",
+    "tests": "npm test"
+  },
+  "requiredCommands": ["typecheck", "tests"],
+  "entry": "src/cli.ts",
+  "roots": ["src"],
+  "deliverables": ["bin/gates.mjs", "src/cli.ts"],
+  "probes": [
+    {
+      "id": "projet-sain-sort-en-0",
+      "criterion": "AC-1",
+      "kind": "cli",
+      "run": "cd fixtures/projet-sain && node ../../bin/gates.mjs check",
+      "expect": { "exitCode": 0, "stdout": "/TOUT VERT/" }
+    },
+    {
+      "id": "livrable-injoignable-sort-en-1",
+      "criterion": "AC-2",
+      "kind": "cli",
+      "run": "cd fixtures/projet-casse && node ../../bin/gates.mjs check",
+      "expect": { "exitCode": 1, "stdout": "/orphelin\\.mjs/" }
+    },
+    {
+      "id": "sans-config-sort-en-2",
+      "criterion": "AC-3",
+      "kind": "cli",
+      "run": "cd fixtures/projet-sans-config && node ../../bin/gates.mjs check",
+      "expect": { "exitCode": 2, "stderr": "/gates\\.json/" }
+    }
+  ],
+  "coverage": {
+    "runtime": "node",
+    "requireExecuted": ["src/**/*.ts"],
+    "allowUnexecuted": ["src/**/*.test.ts", "src/types.ts"]
+  }
+}

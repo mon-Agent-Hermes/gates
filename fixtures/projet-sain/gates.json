@@ -1,0 +1,17 @@
+{
+  "entry": "src/main.mjs",
+  "roots": [
+    "src"
+  ],
+  "probes": [
+    {
+      "id": "lance",
+      "kind": "cli",
+      "run": "node src/main.mjs",
+      "expect": {
+        "exitCode": 0,
+        "stdout": "ok"
+      }
+    }
+  ]
+}
