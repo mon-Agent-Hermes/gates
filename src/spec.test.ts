@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAcceptanceCriteria } from "./spec";
+import { parseAcceptanceCriteria } from "./spec.js";
 
 describe("parseAcceptanceCriteria", () => {
   it("lit les AC-n au format imposé (gras + tiret cadratin)", () => {

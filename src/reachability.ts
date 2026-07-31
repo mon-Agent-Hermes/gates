@@ -104,15 +104,37 @@ export function cssReferences(css: string): string[] {
   return out;
 }
 
+/**
+ * Extension écrite dans le specifier → extensions à essayer sur le disque.
+ *
+ * En TypeScript ESM, un import s'écrit avec l'extension de la sortie COMPILÉE, pas
+ * celle du fichier source : `import { x } from "./report.js"` dans `report.ts` désigne
+ * `report.ts`. Ce n'est pas une bizarrerie de style, c'est ce que Node exige à
+ * l'exécution — une sortie sans extension est irrésolvable en ESM. Un projet
+ * TypeScript correct s'écrit donc ainsi, et sans cette table l'analyse le déclarait
+ * intégralement injoignable : le pire des faux positifs, puisqu'il frappe le code
+ * juste et épargne le code fautif.
+ */
+const TS_FROM_JS: Record<string, string[]> = {
+  ".js": [".ts", ".tsx", ".js", ".jsx"],
+  ".jsx": [".tsx", ".jsx"],
+  ".mjs": [".mts", ".mjs"],
+  ".cjs": [".cts", ".cjs"],
+};
+
 /** Résout un specifier vers un fichier réel (essaie les extensions et /index). */
 function resolveRef(projectDir: string, fromFile: string, spec: string): string | null {
   const base = spec.startsWith("/")
     ? resolve(projectDir, spec.replace(/^\/+/, ""))
     : resolve(dirname(fromFile), spec);
   const candidates = [base];
-  if (!extname(base)) {
-    for (const ext of JS_RESOLVE_EXT) candidates.push(base + ext);
-    for (const ext of JS_RESOLVE_EXT) candidates.push(join(base, "index" + ext));
+  const ext = extname(base).toLowerCase();
+  if (!ext) {
+    for (const e of JS_RESOLVE_EXT) candidates.push(base + e);
+    for (const e of JS_RESOLVE_EXT) candidates.push(join(base, "index" + e));
+  } else if (TS_FROM_JS[ext]) {
+    const sansExt = base.slice(0, -ext.length);
+    for (const e of TS_FROM_JS[ext]!) candidates.push(sansExt + e);
   }
   return candidates.find((c) => existsSync(c)) ?? null;
 }

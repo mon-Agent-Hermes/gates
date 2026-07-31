@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { analyzeReachability, htmlReferences, moduleReferences, cssReferences } from "./reachability";
+import { analyzeReachability, htmlReferences, moduleReferences, cssReferences } from "./reachability.js";
 
 /** Petit projet jetable : chemins relatifs → contenu. */
 function project(files: Record<string, string>): string {
@@ -116,6 +116,32 @@ describe("analyzeReachability", () => {
     const dir = project({ "src/lib/thing.py": "def f(): pass" });
     const r = await analyzeReachability(dir);
     expect(r.conclusive).toBe(false);
+    expect(r.unreachable).toEqual([]);
+  });
+
+  // Régression : gates s'est déclaré lui-même intégralement mort le jour où ses imports
+  // sont passés en `./x.js` — la forme qu'exige Node ESM. Un projet TypeScript correct
+  // était donc jugé injoignable en bloc. Faux positif le plus coûteux qui soit : il
+  // frappe le code juste et laisse passer le code fautif.
+  it("TypeScript ESM : un import en `.js` désigne le `.ts` voisin", async () => {
+    const dir = project({
+      "src/main.ts": `import { a } from "./a.js";\nimport { b } from "./sous/index.js";\na(); b();`,
+      "src/a.ts": "export const a = () => {};",
+      "src/sous/index.ts": "export const b = () => {};",
+      "src/mort.ts": "export const mort = () => {};",
+    });
+    const r = await analyzeReachability(dir);
+    expect(r.conclusive).toBe(true);
+    // Seul `mort.ts` est injoignable : a.ts et sous/index.ts ont bien été résolus.
+    expect(r.unreachable).toEqual(["src/mort.ts"]);
+  });
+
+  it("le `.js` réel reste résolu quand il n'y a pas de `.ts` du même nom", async () => {
+    const dir = project({
+      "src/main.ts": `import { a } from "./a.js";\na();`,
+      "src/a.js": "export const a = () => {};",
+    });
+    const r = await analyzeReachability(dir);
     expect(r.unreachable).toEqual([]);
   });
 });

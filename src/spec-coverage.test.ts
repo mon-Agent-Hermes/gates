@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { checkSpecCoverage } from "./spec-coverage";
-import type { AcceptanceCriterion } from "./spec";
+import { checkSpecCoverage } from "./spec-coverage.js";
+import type { AcceptanceCriterion } from "./spec.js";
 
 const ac = (...ids: string[]): AcceptanceCriterion[] => ids.map((id) => ({ id, text: id }));
 

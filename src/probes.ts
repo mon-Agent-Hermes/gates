@@ -3,10 +3,10 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { startApp, probeUrl } from "./sandbox";
-import { observePage, classifyPage, type PageRequirements, type PageAction } from "./page-check";
-import { countCoverageFiles, noteServerCoverage, type CoverageContext } from "./coverage";
-import type { CheckResult } from "./types";
+import { startApp, probeUrl } from "./sandbox.js";
+import { observePage, classifyPage, type PageRequirements, type PageAction } from "./page-check.js";
+import { countCoverageFiles, noteServerCoverage, type CoverageContext } from "./coverage.js";
+import type { CheckResult } from "./types.js";
 
 export type { CoverageContext };
 

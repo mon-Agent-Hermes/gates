@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildCriteria, buildReport, renderText, type ProbeOutcome } from "./report";
-import type { CheckResult } from "./types";
+import { buildCriteria, buildReport, renderText, type ProbeOutcome } from "./report.js";
+import type { CheckResult } from "./types.js";
 
 const ok: CheckResult = { name: "tests", status: "passed", output: "12 passed" };
 

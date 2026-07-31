@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import type { CheckResult } from "./types";
+import type { CheckResult } from "./types.js";
 
 /**
  * Garde-fou FRONT déterministe : la page REND-elle vraiment ?

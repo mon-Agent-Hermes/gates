@@ -1,0 +1,7 @@
+// Compilation de distribution. Le tsconfig.json principal inclut les tests — c'est
+// voulu, ils doivent être typés — mais un projet tiers qui installe `gates` n'a que
+// faire de `*.test.js` ni d'une référence à vitest dans son node_modules.
+{
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts"]
+}

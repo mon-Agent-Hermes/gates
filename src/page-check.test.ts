@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import {
   classifyPage, findChrome, chromeCandidates, isRelevantConsoleError, isRelevantRequestFailure,
   runPageCheck, type PageObservation,
-} from "./page-check";
+} from "./page-check.js";
 
 // Note de portage : le bloc `derivePageRequirements` (déduction des exigences depuis la
 // prose de la spec) vivait dans `plan.ts`, jeté avec l'orchestration. Dans le modèle

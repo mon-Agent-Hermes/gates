@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
   adapterEnv, checkCoverage, collectCoverage, countCoverageFiles, globToRegExp,
   noteServerCoverage, resolveAdapter, toProjectFile, type CoverageContext,
-} from "./coverage";
+} from "./coverage.js";
 
 async function fixture(): Promise<{ project: string; cov: string; clean: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "gates-cov-test-"));

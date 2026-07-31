@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { runProbe, runProbes, aggregateProbes, textMatches, type Probe } from "./probes";
-import { findChrome } from "./page-check";
+import { runProbe, runProbes, aggregateProbes, textMatches, type Probe } from "./probes.js";
+import { findChrome } from "./page-check.js";
 
 // Commande node portable (cmd.exe et sh) : écrit un fichier dans $TMP et logue.
 // `process.argv[1]` vaut le premier argument positionnel après `-e` (ici $TMP).

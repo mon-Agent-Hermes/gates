@@ -3,8 +3,8 @@ import { mkdtemp, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { runPageCheck, type PageRequirements } from "./page-check";
-import type { CheckResult, FileSpec, GuardrailResult } from "./types";
+import { runPageCheck, type PageRequirements } from "./page-check.js";
+import type { CheckResult, FileSpec, GuardrailResult } from "./types.js";
 
 /**
  * Garde-fous DÉTERMINISTES.
