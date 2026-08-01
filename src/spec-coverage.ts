@@ -1,4 +1,4 @@
-import type { AcceptanceCriterion } from "./spec";
+import type { AcceptanceCriterion } from "./spec.js";
 
 /**
  * Check `spec-coverage` (§2.7) — purement mécanique, il referme le dernier trou du

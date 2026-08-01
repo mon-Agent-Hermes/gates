@@ -3,18 +3,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions } from "./sandbox";
-import { analyzeReachability } from "./reachability";
-import { runProbesAgainst, aggregateProbes, type Probe, type ProbeResult } from "./probes";
-import { parseAcceptanceCriteria } from "./spec";
-import { checkSpecCoverage } from "./spec-coverage";
+import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions } from "./sandbox.js";
+import { analyzeReachability } from "./reachability.js";
+import { runProbesAgainst, aggregateProbes, type Probe, type ProbeResult } from "./probes.js";
+import { parseAcceptanceCriteria } from "./spec.js";
+import { checkSpecCoverage } from "./spec-coverage.js";
 import {
   adapterEnv, checkCoverage, collectCoverage, countCoverageFiles, expandCov, listFiles,
   noteServerCoverage, resolveAdapter, type CoverageConfig, type CoverageContext,
-} from "./coverage";
-import type { PageRequirements } from "./page-check";
-import type { CheckResult } from "./types";
-import { buildCriteria, buildReport, renderText, type GatesReport } from "./report";
+} from "./coverage.js";
+import type { PageRequirements } from "./page-check.js";
+import type { CheckResult } from "./types.js";
+import { buildCriteria, buildReport, renderText, type GatesReport } from "./report.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).

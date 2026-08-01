@@ -1,4 +1,4 @@
-import type { CheckResult } from "./types";
+import type { CheckResult } from "./types.js";
 
 /**
  * Format de sortie de `gates check` (§2.3).

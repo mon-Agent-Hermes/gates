@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isToolMissing, checkDeliverables, isRouteServed, probeUrl } from "./sandbox";
+import { isToolMissing, checkDeliverables, isRouteServed, probeUrl } from "./sandbox.js";
 
 describe("isToolMissing (outil absent vs vrai échec)", () => {
   it("détecte un binaire absent (ENOENT / exit 127 / 9009 / message shell)", () => {

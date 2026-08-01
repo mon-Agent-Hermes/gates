@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { check } from "./cli";
+import { check } from "./cli.js";
 
 /**
  * Validation de bout en bout sur PLUSIEURS TYPES DE PROJETS.

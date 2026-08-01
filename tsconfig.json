@@ -1,13 +1,19 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "Bundler",
+    // NodeNext, pas Bundler : la sortie de `tsc` doit tourner sous Node sans
+    // empaqueteur. Bundler tolère les imports sans extension, que Node ESM refuse
+    // à l'exécution — le dist/ compilait mais ne démarrait pas.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node"],
+    // rootDir explicite : sans lui la sortie serait dist/src/cli.js, et le shim
+    // cherche dist/cli.js.
+    "rootDir": "src",
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"]
