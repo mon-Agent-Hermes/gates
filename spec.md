@@ -17,3 +17,4 @@ vérification (un juge joignable par le réseau n'est pas un juge).
 - **AC-1** — sur un projet sain, `gates check` rend un verdict vert et sort en 0.
 - **AC-2** — sur un projet dont un livrable n'est atteignable depuis aucun point d'entrée, `gates check` sort en 1 et **nomme le fichier** en cause.
 - **AC-3** — dans un dossier sans `gates.json`, `gates check` sort en 2 (configuration invalide), et non en 1 : l'agent doit corriger la configuration, pas le code.
+- **AC-4** — sur un `gates.json` déclarant une clé qu'aucun check ne lit (dans une probe, dans `request`, dans `expect`), `gates check` sort en 2 et **nomme la clé** : une attente que le juge ne comprend pas ne doit jamais se lire comme une attente vérifiée.

@@ -1,0 +1,15 @@
+{
+  "entry": "src/main.mjs",
+  "roots": [
+    "src"
+  ],
+  "probes": [
+    {
+      "id": "liste-des-taches",
+      "criterion": "AC-7",
+      "kind": "http",
+      "request": { "method": "GET", "path": "/taches" },
+      "expect": { "status": 200, "json": { "taches": [] } }
+    }
+  ]
+}

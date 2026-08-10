@@ -62,8 +62,20 @@ export type HttpProbe = {
     statusNot?: number[];
     /** Le corps de réponse doit correspondre (`/regex/` ou sous-chaîne). */
     bodyMatch?: string;
-    /** Chaque en-tête attendu doit être présent (valeur : correspondance par sous-chaîne). */
+    /**
+     * Chaque en-tête attendu doit être présent — valeur : SOUS-CHAÎNE LITTÉRALE,
+     * jamais une regex, contrairement à `bodyMatch`. Écrire ici `"/application\/json/"`
+     * (le réflexe naturel) cherche donc ces slashs dans la valeur reçue et rougit à
+     * tort. Pour une regex, voir `headerMatch`.
+     */
     headers?: Record<string, string>;
+    /**
+     * Comme `headers`, mais la valeur suit la convention de `bodyMatch` :
+     * `"/regex/flags"` → expression régulière, sinon sous-chaîne littérale.
+     * Les deux clés coexistent : `headers` garde son sens littéral pour les
+     * `gates.json` déjà écrits, `headerMatch` porte les regex.
+     */
+    headerMatch?: Record<string, string>;
   };
 };
 
@@ -111,6 +123,122 @@ export type ProbeResult = {
   status: "passed" | "failed" | "skipped";
   output: string;
 };
+
+// ── Validation au CHARGEMENT (§2.4) ──────────────────────────────────────────────
+
+/**
+ * Clés RECONNUES d'une probe, par kind. C'est la liste qui fait autorité, et le seul
+ * endroit où le trou suivant se referme.
+ *
+ * Le défaut : l'évaluation ne lit que les clés qu'elle connaît et TRAVERSE les autres
+ * en silence. Un `expect: { json: {…} }` sur une probe http rendait donc un critère
+ * VERT qui n'avait vérifié que le code HTTP — le corps de la réponse, c'est-à-dire
+ * l'objet même du projet, n'était jamais contrôlé. À l'évaluation il est déjà trop
+ * tard : la clé inconnue n'a plus de sens à donner. Au chargement, elle est ce qu'elle
+ * est — une config invalide, exit 2, au même titre qu'un `gates.json` illisible. C'est
+ * la config que l'agent doit corriger, pas le code.
+ *
+ * ⚠️ Cette table DOIT suivre les types ci-dessus. Un champ ajouté au type mais oublié
+ * ici devient inutilisable (faux rouge, bruyant) ; l'oubli inverse — une clé listée ici
+ * que personne ne lit — rouvre exactement le faux vert qu'on vient de fermer.
+ */
+const COMMON_KEYS = ["id", "criterion", "kind"] as const;
+
+type ProbeShape = {
+  /** Clés propres au kind, en plus de `COMMON_KEYS` et de `expect`. */
+  probe: readonly string[];
+  /** Clés de `request` (kinds qui en ont un). */
+  request?: readonly string[];
+  expect: readonly string[];
+};
+
+const PROBE_SHAPES: Record<string, ProbeShape> = {
+  cli: { probe: ["run"], expect: ["exitCode", "stdout", "stderr", "files"] },
+  artifact: { probe: ["run", "file"], expect: ["minBytes", "openableBy"] },
+  http: {
+    probe: ["request"],
+    request: ["method", "path", "headers", "body"],
+    expect: ["status", "statusNot", "bodyMatch", "headers", "headerMatch"],
+  },
+  browser: {
+    probe: ["path", "actions"],
+    expect: ["requireSelectors", "requireCanvas", "minDrawCalls", "waitMs", "noConsoleErrors"],
+  },
+  process: { probe: ["start", "url", "logMatch", "readyTimeoutMs"], expect: ["logMatch"] },
+};
+
+/** Clés d'une entrée de `actions` (probe `browser`) — cf. `PageAction`. */
+const ACTION_KEYS = ["click", "type", "wait"] as const;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Une clé absente de `allowed` est une erreur NOMMÉE (la clé, et ce qui était attendu). */
+function collectUnknown(obj: Record<string, unknown>, allowed: readonly string[], where: string, out: string[]): void {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.includes(k)) out.push(`clé inconnue « ${k} »${where} (reconnues : ${allowed.join(", ")})`);
+  }
+}
+
+/** Sous-objet attendu : soit absent, soit un objet — sinon on ne peut rien en dire. */
+function subObject(v: unknown, name: string, prefix: string, out: string[]): Record<string, unknown> | null {
+  if (v === undefined) return null;
+  if (!isPlainObject(v)) {
+    out.push(`${prefix} : \`${name}\` doit être un objet`);
+    return null;
+  }
+  return v;
+}
+
+/**
+ * Valide les `probes` d'un `gates.json` AVANT toute exécution. Retourne la liste des
+ * raisons (vide = config valide) ; l'appelant sort en 2, « config invalide ».
+ *
+ * Un `kind` INCONNU reste accepté : il est `skipped` à l'évaluation (donc jamais un
+ * faux vert, cf. `UnknownProbe`), et on ne peut pas juger des clés d'un schéma qu'on
+ * ne connaît pas. Une probe d'un kind connu, elle, ne cache plus rien.
+ */
+export function validateProbes(probes: unknown): string[] {
+  if (probes === undefined || probes === null) return [];
+  if (!Array.isArray(probes)) return ["`probes` doit être une liste"];
+
+  const errors: string[] = [];
+  probes.forEach((p, i) => {
+    const at = `probes[${i}]`;
+    if (!isPlainObject(p)) {
+      errors.push(`${at} : une probe doit être un objet`);
+      return;
+    }
+    const id = typeof p.id === "string" ? p.id : "";
+    const kind = typeof p.kind === "string" ? p.kind : "";
+    const prefix = id ? `${at} « ${id} »` : at;
+    if (!id) errors.push(`${at} : \`id\` manquant — une probe échouée doit pouvoir se nommer`);
+    if (!kind) {
+      errors.push(`${prefix} : \`kind\` manquant (attendu : ${Object.keys(PROBE_SHAPES).join(", ")})`);
+      return;
+    }
+
+    const shape = PROBE_SHAPES[kind];
+    if (!shape) return; // kind inconnu → probe `skipped`, schéma inconnaissable
+
+    collectUnknown(p, [...COMMON_KEYS, ...shape.probe, "expect"], ` dans ${prefix}`, errors);
+
+    const request = subObject(p.request, "request", prefix, errors);
+    if (request && shape.request) collectUnknown(request, shape.request, ` dans ${prefix}, request`, errors);
+
+    const exp = subObject(p.expect, "expect", prefix, errors);
+    if (exp) collectUnknown(exp, shape.expect, ` dans ${prefix}, expect`, errors);
+
+    if (kind === "browser" && p.actions !== undefined) {
+      if (!Array.isArray(p.actions)) errors.push(`${prefix} : \`actions\` doit être une liste`);
+      else p.actions.forEach((a, j) => {
+        if (!isPlainObject(a)) errors.push(`${prefix} : actions[${j}] doit être un objet`);
+        else collectUnknown(a, ACTION_KEYS, ` dans ${prefix}, actions[${j}]`, errors);
+      });
+    }
+  });
+  return errors;
+}
 
 /** Config de l'app partagée que démarrent les probes `http`/`browser`. */
 export type ProbeAppConfig = { start: string; url: string; readyTimeoutMs?: number };
@@ -265,9 +393,19 @@ async function runHttpProbe(p: HttpProbe, baseUrl: string): Promise<ProbeResult>
     if (exp.status !== undefined && status !== exp.status) reasons.push(`statut ${status} (attendu ${exp.status})`);
     if (exp.statusNot?.includes(status)) reasons.push(`statut ${status} interdit (route non montée ?)`);
     if (exp.bodyMatch && !textMatches(exp.bodyMatch, body)) reasons.push(`corps ne correspond pas à ${exp.bodyMatch}`);
+    // Deux clés, deux sémantiques ASSUMÉES : `headers` compare par sous-chaîne
+    // littérale, `headerMatch` suit la convention de `bodyMatch` (`/regex/` ou
+    // sous-chaîne). Changer `headers` en regex ferait changer de sens des `gates.json`
+    // déjà écrits sans que personne ne les édite ; une clé en plus, elle, ne ment à
+    // personne — et la validation au chargement refuse désormais toute confusion
+    // entre les deux (`headerMach`, `headersMatch`… sortent en 2).
     for (const [k, v] of Object.entries(exp.headers ?? {})) {
       const got = headers?.get(k) ?? "";
       if (!got.includes(v)) reasons.push(`en-tête ${k} = « ${got} » (attendu contenir « ${v} »)`);
+    }
+    for (const [k, v] of Object.entries(exp.headerMatch ?? {})) {
+      const got = headers?.get(k) ?? "";
+      if (!textMatches(v, got)) reasons.push(`en-tête ${k} = « ${got} » ne correspond pas à ${v}`);
     }
   }
   return reasons.length ? fail(p, `${method} ${p.request.path} : ${reasons.join(" ; ")}`) : pass(p, `${method} ${p.request.path} → ${status}`);
