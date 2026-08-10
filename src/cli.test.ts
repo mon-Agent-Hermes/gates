@@ -298,6 +298,43 @@ describe("configuration", () => {
     } finally { await clean(); }
   }, 30_000);
 
+  it("`expect: { json }` sur une probe http → exit 2, PAS un rapport vert", async () => {
+    // Le faux vert tel qu'il s'est produit : le projet croit vérifier le corps de la
+    // réponse, gates ne lit que le statut, `json` est traversé en silence, AC-7 vire au
+    // vert. Le refus tombe au CHARGEMENT : aucun serveur n'est démarré, rien ne tourne.
+    const { dir, clean } = await projet({
+      "spec.md": `# Spec\n\n## Critères d'acceptation\n\n- **AC-7** — GET /taches renvoie la liste.\n`,
+      "gates.json": JSON.stringify({
+        // `readyTimeoutMs` court : sans le correctif, ce test doit échouer sur son
+        // assertion (« attendu configError »), pas s'éterniser à démarrer une app.
+        app: { start: "node serveur.mjs", url: "http://127.0.0.1:38999/taches", readyTimeoutMs: 1500 },
+        probes: [{
+          id: "liste-des-taches", criterion: "AC-7", kind: "http",
+          request: { method: "GET", path: "/taches" },
+          expect: { status: 200, json: { taches: [] } },
+        }],
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || !("configError" in r)) throw new Error(`attendu configError, obtenu ${JSON.stringify(r)}`);
+      expect(r.configError).toMatch(/json/);
+      expect(r.configError).toMatch(/liste-des-taches/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("`--only` ne contourne pas la validation de la config", async () => {
+    const { dir, clean } = await projet({
+      "gates.json": JSON.stringify({
+        probes: [{ id: "p", kind: "cli", run: "node -e \"0\"", expect: { exitCode: 0, contains: "x" } }],
+      }),
+    });
+    try {
+      const r = await check(dir, { only: ["assembly"] });
+      expect(r && "configError" in r).toBe(true);
+    } finally { await clean(); }
+  }, 30_000);
+
   it("aucun gates.json → null (exit 2)", async () => {
     const { dir, clean } = await projet({ "vide.txt": "" });
     try {

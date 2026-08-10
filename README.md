@@ -79,7 +79,7 @@ Absent → gate `skipped` (jamais un faux rouge). En CI, on installe Chrome et o
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest (107 tests, dont un vrai navigateur si Chrome présent)
+npm test            # vitest (118 tests, dont un vrai navigateur si Chrome présent)
 ```
 
 ## Probes (§2.5)
@@ -99,6 +99,15 @@ npm test            # vitest (107 tests, dont un vrai navigateur si Chrome prés
 probe** (`init-cree-la-config : fichier attendu absent`), pas le check. `stdout`/`stderr`
 acceptent une regex slashée (`"/…/"`) ou une sous-chaîne littérale.
 
+### Toute clé inconnue est une config invalide (exit 2)
+
+Les clés d'une probe, de son `request` et de son `expect` sont **closes** : une clé
+qu'aucun check ne lit fait sortir `gates check` en **2** en la nommant, comme un
+`gates.json` illisible. Sans ce refus, `expect: { "json": … }` sur une probe `http`
+rendait un critère **vert** qui n'avait vérifié que le code HTTP — le corps de la
+réponse, l'objet même du projet, n'était jamais contrôlé. Un `kind` inconnu, lui, reste
+accepté : il est `skipped` (jamais vert) et son schéma est par définition inconnaissable.
+
 ### Probes serveur — `http`, `browser`, `process`
 
 Les probes `http` et `browser` sondent l'**app démarrée par le harnais** (déclarée dans
@@ -109,7 +118,8 @@ tient debout (réponse HTTP sur `url`, ou ligne de log `logMatch`).
 "probes": [
   { "id": "liste", "criterion": "AC-7", "kind": "http",
     "request": { "method": "GET", "path": "/tasks" },
-    "expect": { "statusNot": [404, 500], "bodyMatch": "[" } },
+    "expect": { "statusNot": [404, 500], "bodyMatch": "[",
+                "headerMatch": { "content-type": "/application\\/json/" } } },
 
   { "id": "selection-puis-arene", "criterion": "AC-1", "kind": "browser",
     "path": "/", "actions": [{ "click": "#choix-guerrier" }, { "wait": 300 }],
@@ -119,6 +129,13 @@ tient debout (réponse HTTP sur `url`, ou ligne de log `logMatch`).
     "start": "node worker.mjs", "logMatch": "/ready/i", "readyTimeoutMs": 8000 }
 ]
 ```
+
+Deux clés pour les en-têtes, deux sémantiques **assumées** : `headers` compare par
+**sous-chaîne littérale**, `headerMatch` suit la convention de `bodyMatch` (`"/regex/"`
+ou sous-chaîne). Écrire une regex dans `headers` cherche donc les slashs eux-mêmes dans
+la valeur reçue, et rougit à tort — `headerMatch` est là pour ça. (`headers` n'a pas été
+converti aux regex : cela aurait changé le sens des `gates.json` déjà écrits sans que
+personne ne les édite.)
 
 Le check `smoke` et les probes `http`/`browser` partagent **une seule** instance : quand
 `app` et des probes serveur coexistent, l'app est démarrée **une fois** puis arrêtée (pas

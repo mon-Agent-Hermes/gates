@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions } from "./sandbox.js";
 import { analyzeReachability } from "./reachability.js";
-import { runProbesAgainst, aggregateProbes, type Probe, type ProbeResult } from "./probes.js";
+import { runProbesAgainst, aggregateProbes, validateProbes, type Probe, type ProbeResult } from "./probes.js";
 import { parseAcceptanceCriteria } from "./spec.js";
 import { checkSpecCoverage } from "./spec-coverage.js";
 import {
@@ -51,6 +51,18 @@ async function loadConfig(dir: string): Promise<GatesConfig | null> {
 }
 
 /**
+ * Contrôle du CONTRAT de `gates.json`, avant qu'un seul gate ne tourne.
+ *
+ * Une clé qu'aucun check ne lit n'est pas une coquetterie : elle est SILENCIEUSE à
+ * l'exécution, et un `expect` dont la moitié est silencieuse rend un critère vert qui
+ * n'a rien vérifié. Le refus doit donc tomber ici, au chargement, où la clé est encore
+ * une faute de config — pas à l'évaluation, où elle n'est déjà plus rien.
+ */
+function validateConfig(cfg: GatesConfig): string[] {
+  return validateProbes(cfg.probes);
+}
+
+/**
  * Lance les checks déclarés par `gates.json` dans `dir` et agrège le verdict.
  * exit 0 = tout vert · 1 = au moins un rouge · 2 = config invalide (géré par l'appelant).
  */
@@ -60,6 +72,11 @@ export async function check(
 ): Promise<{ ok: boolean; report: GatesReport } | { configError: string } | null> {
   const cfg = await loadConfig(dir);
   if (!cfg) return null;
+
+  // Config invalide AVANT toute exécution : `--only` ne doit pas pouvoir contourner ce
+  // contrôle, sinon la clé silencieuse reviendrait par la porte de service.
+  const configErrors = validateConfig(cfg);
+  if (configErrors.length) return { configError: configErrors.join("\n  ") };
 
   const want = (name: string) => !opts.only || opts.only.includes(name);
   const checks: CheckResult[] = [];

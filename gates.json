@@ -28,6 +28,13 @@
       "kind": "cli",
       "run": "cd fixtures/projet-sans-config && node ../../bin/gates.mjs check",
       "expect": { "exitCode": 2, "stderr": "/gates\\.json/" }
+    },
+    {
+      "id": "cle-inconnue-sort-en-2",
+      "criterion": "AC-4",
+      "kind": "cli",
+      "run": "cd fixtures/projet-config-invalide && node ../../bin/gates.mjs check",
+      "expect": { "exitCode": 2, "stderr": "/clé inconnue « json »/" }
     }
   ],
   "coverage": {
