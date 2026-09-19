@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runProbe, runProbes, aggregateProbes, textMatches, validateProbes, type Probe } from "./probes.js";
 import { findChrome } from "./page-check.js";
+import { collectCoverage, type CoverageContext } from "./coverage.js";
 
 // Commande node portable (cmd.exe et sh) : écrit un fichier dans $TMP et logue.
 // `process.argv[1]` vaut le premier argument positionnel après `-e` (ici $TMP).
@@ -259,5 +263,38 @@ describe.skipIf(!hasChrome)("probe browser (actions jouées avant observation)",
     expect(results[0].status, results[0].output).toBe("passed");
     expect(results[1].status).toBe("failed");
     expect(results[1].output).toMatch(/ne rend RIEN/);
+  }, 60_000);
+});
+
+// ── Couverture navigateur de bout en bout (chantier 7) ──────────────────────────
+// Un fichier qui ne s'exécute QUE dans la page : jusqu'ici invisible, il comptait comme
+// « mesure incomplète ». Servi tel quel, il est maintenant rattaché et compté.
+describe.skipIf(!hasChrome)("probe browser sous couverture", () => {
+  it("le script servi et appelé compte comme exécuté ; rien n'est signalé incomplet", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gates-covnav-e2e-"));
+    const covDir = await mkdtemp(join(tmpdir(), "gates-covnav-mesure-"));
+    try {
+      await mkdir(join(dir, "public"), { recursive: true });
+      await writeFile(join(dir, "public", "app.js"), "function dessiner(){document.querySelector('canvas').getContext('2d').fillRect(0,0,9,9)}\ndessiner();\n");
+      await writeFile(join(dir, "serveur.cjs"), [
+        "const fs = require('fs'); const path = require('path');",
+        "require('http').createServer((q, s) => {",
+        "  if (q.url === '/app.js') { s.writeHead(200, {'content-type': 'text/javascript'}); s.end(fs.readFileSync(path.join(__dirname, 'public', 'app.js'))); return; }",
+        "  s.writeHead(200, {'content-type': 'text/html'}); s.end('<canvas width=10 height=10></canvas><script src=\"/app.js\"></script>');",
+        "}).listen(39284, '127.0.0.1');",
+        "process.on('SIGTERM', () => process.exit(0));",
+      ].join("\n"));
+      const cov: CoverageContext = { dir: covDir, env: {}, incomplete: [] };
+      const app = { start: "node serveur.cjs", url: "http://127.0.0.1:39284/", readyTimeoutMs: 8000 };
+      const probes: Probe[] = [{ id: "dessine", kind: "browser", path: "/", expect: { requireCanvas: true, minDrawCalls: 1, waitMs: 200 } }];
+      const [r] = await runProbes(probes, { dir, app, coverage: cov });
+      expect(r.status, r.output).toBe("passed");
+      expect(cov.incomplete.filter((n) => /navigateur|sans fichier source/.test(n))).toEqual([]);
+      const data = await collectCoverage("v8", covDir, dir);
+      expect(data.executed.has("public/app.js")).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(covDir, { recursive: true, force: true });
+    }
   }, 60_000);
 });

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   adapterEnv, checkCoverage, collectCoverage, countCoverageFiles, globToRegExp,
-  noteServerCoverage, resolveAdapter, toProjectFile, type CoverageContext,
+  noteServerCoverage, resolveAdapter, servedToProjectFile, toProjectFile, writeBrowserCoverage, type CoverageContext,
 } from "./coverage.js";
 
 async function fixture(): Promise<{ project: string; cov: string; clean: () => Promise<void> }> {
@@ -321,5 +321,63 @@ describe("noteServerCoverage — constater plutôt que supposer", () => {
       await noteServerCoverage(ctx, "l'app partagée", 0, { graceful: true });
       expect(ctx.incomplete).toEqual([]);
     } finally { await clean(); }
+  });
+});
+
+describe("couverture NAVIGATEUR — rattacher les scripts servis aux fichiers du projet", () => {
+  const fn = (functionName: string, count: number) => ({
+    functionName, isBlockCoverage: false, ranges: [{ startOffset: 0, endOffset: 10, count }],
+  });
+
+  it("un script servi tel quel devient une mesure V8 lue comme les autres", async () => {
+    const cov = await mkdtemp(join(tmpdir(), "gates-covnav-"));
+    const projet = await mkdtemp(join(tmpdir(), "gates-projnav-"));
+    try {
+      const files = ["public/app.js", "public/mort.js", "serveur.mjs"];
+      const r = await writeBrowserCoverage([
+        { url: "http://127.0.0.1:4000/app.js", rawScriptCoverage: { functions: [fn("", 1), fn("demarrer", 1)] } },
+        { url: "http://127.0.0.1:4000/mort.js", rawScriptCoverage: { functions: [fn("", 1), fn("jamais", 0)] } },
+        { url: "http://127.0.0.1:4000/", rawScriptCoverage: { functions: [fn("", 1)] } },
+        { url: "https://cdn.exemple.net/lib.js", rawScriptCoverage: { functions: [fn("", 1)] } },
+        { url: "http://127.0.0.1:4000/assets/index-3f2a.js", rawScriptCoverage: { functions: [fn("", 1)] } },
+      ], "http://127.0.0.1:4000/", { dir: cov, projectDir: projet, projectFiles: files });
+
+      expect(r.attached.sort()).toEqual(["public/app.js", "public/mort.js"]);
+      expect(r.unattached).toEqual(["/assets/index-3f2a.js"]);
+
+      const data = await collectCoverage("v8", cov, projet, files);
+      expect([...data.executed]).toEqual(["public/app.js"]);
+      expect([...data.loadedOnly]).toEqual(["public/mort.js"]);
+    } finally {
+      await rm(cov, { recursive: true, force: true });
+      await rm(projet, { recursive: true, force: true });
+    }
+  });
+
+  it("rien de rattachable → aucun fichier écrit, rien d'inventé", async () => {
+    const cov = await mkdtemp(join(tmpdir(), "gates-covnav-"));
+    try {
+      const r = await writeBrowserCoverage(
+        [{ url: "http://127.0.0.1:4000/bundle.js", rawScriptCoverage: { functions: [fn("", 1)] } }],
+        "http://127.0.0.1:4000/", { dir: cov, projectDir: cov, projectFiles: [] },
+      );
+      expect(r).toEqual({ attached: [], unattached: ["/bundle.js"] });
+      expect(await countCoverageFiles(cov)).toBe(0);
+    } finally {
+      await rm(cov, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("servedToProjectFile — un chemin servi, un seul fichier, ou rien", () => {
+  const files = ["public/app.js", "src/jeu.js", "a/util.js", "b/util.js"];
+  it("chemin identique, ou servi depuis un dossier racine", () => {
+    expect(servedToProjectFile("/src/jeu.js", files)).toBe("src/jeu.js");
+    expect(servedToProjectFile("/app.js", files)).toBe("public/app.js");
+  });
+  it("ambigu ou absent → null : on ne devine pas", () => {
+    expect(servedToProjectFile("/util.js", files)).toBeNull();
+    expect(servedToProjectFile("/bundle.js", files)).toBeNull();
+    expect(servedToProjectFile("/../secret.js", files)).toBeNull();
   });
 });
