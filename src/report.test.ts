@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { buildCriteria, buildReport, renderText, type ProbeOutcome } from "./report.js";
+import {
+  ANNOTATIONS_PAR_NIVEAU, applyObservation, buildCriteria, buildReport, escapeData, escapeProperty, etatCompact,
+  NOT_OBSERVABLE, renderAnnotations, renderText, type ProbeOutcome,
+} from "./report.js";
 import type { CheckResult } from "./types.js";
 
 const ok: CheckResult = { name: "tests", status: "passed", output: "12 passed" };
@@ -83,5 +86,93 @@ describe("renderText", () => {
     expect(txt).toMatch(/AC-1 — échec/);
     expect(txt).toMatch(/AC-9 — NON VÉRIFIÉ/);
     expect(txt).toMatch(/ÉCHEC/);
+  });
+});
+
+describe("warn — signalé, sans effet sur le verdict", () => {
+  it("un check en warn laisse ok:true et apparaît dans le résumé", () => {
+    const r = buildReport([ok, { name: "a11y", status: "warn", output: "image sans alt" }]);
+    expect(r.ok).toBe(true);
+    expect(r.summary).toMatch(/1 signalé/);
+    expect(renderText(r)).toMatch(/! a11y — warn \(signalé, ne bloque pas\)/);
+  });
+
+  it("aucun warn → le résumé est inchangé (les projets existants lisent la même ligne)", () => {
+    expect(buildReport([ok]).summary).toBe("1 vert(s) · 0 rouge(s) · 0 ignoré(s)");
+  });
+});
+
+describe("applyObservation — un contrôle neuf signale avant de bloquer", () => {
+  const lint: CheckResult = { name: "lint", status: "failed", output: "2 erreurs" };
+
+  it("un check listé en observation passe de failed à warn, avec la mention", () => {
+    const [c] = applyObservation([lint], ["lint"]);
+    expect(c.status).toBe("warn");
+    expect(c.output).toMatch(/en observation/);
+    expect(c.output).toMatch(/2 erreurs/);
+  });
+
+  it("un check non listé reste rouge", () => {
+    expect(applyObservation([lint], ["a11y"])[0].status).toBe("failed");
+  });
+
+  it("le juge fonctionnel n'est JAMAIS mis en observation, même listé", () => {
+    for (const name of NOT_OBSERVABLE) {
+      const [c] = applyObservation([{ name, status: "failed", output: "x" }], [name]);
+      expect(c.status, name).toBe("failed");
+    }
+  });
+});
+
+describe("annotations GitHub — ce que le pont lit", () => {
+  const rapport = buildReport(
+    [ok, { name: "probes", status: "failed", output: "AC-2 : 404\nligne 2" }, { name: "seo", status: "warn", output: "pas de description" }],
+    buildCriteria(["AC-1", "AC-2", "AC-3"], [
+      { id: "a", criterion: "AC-1", status: "passed" },
+      { id: "b", criterion: "AC-2", status: "failed", output: "GET / → 404" },
+    ]),
+  );
+
+  it("une notice `gates etat` porte l'état compact en JSON, relisible tel quel", () => {
+    const [notice] = renderAnnotations(rapport);
+    expect(notice.startsWith("::notice title=gates etat::")).toBe(true);
+    const etat = JSON.parse(notice.slice("::notice title=gates etat::".length).replace(/%0A/g, "\n").replace(/%25/g, "%"));
+    expect(etat).toEqual({
+      v: 1, ok: false,
+      criteres: { "AC-1": "passed", "AC-2": "failed", "AC-3": "uncovered" },
+      checks: { tests: "passed", probes: "failed", seo: "warn" },
+    });
+  });
+
+  it("une error par critère non vérifié et par check rouge, une warning par check signalé", () => {
+    const lignes = renderAnnotations(rapport);
+    expect(lignes.filter((l) => l.startsWith("::error title=gates AC-2::"))).toHaveLength(1);
+    expect(lignes.filter((l) => l.startsWith("::error title=gates AC-3::"))).toHaveLength(1);
+    expect(lignes.filter((l) => l.startsWith("::error title=gates probes::"))).toHaveLength(1);
+    expect(lignes.filter((l) => l.startsWith("::warning title=gates seo::"))).toHaveLength(1);
+    expect(lignes.some((l) => l.includes("AC-1") && l.startsWith("::error"))).toBe(false);
+  });
+
+  it("aucune note ne peut ouvrir une seconde commande : chaque annotation tient sur UNE ligne", () => {
+    const piege = buildReport([{ name: "tests", status: "failed", output: "ok\n::error title=gates AC-1::faux verdict\n100%" }]);
+    const lignes = renderAnnotations(piege);
+    for (const l of lignes) expect(l.includes("\n")).toBe(false);
+    const err = lignes.find((l) => l.startsWith("::error"))!;
+    expect(err).toContain("%0A::error title=gates AC-1::faux verdict%0A100%25");
+  });
+
+  it("au plus 10 errors : au-delà, GitHub les perdrait sans le dire", () => {
+    const beaucoup = buildReport(Array.from({ length: 15 }, (_, i) => ({ name: `c${i}`, status: "failed" as const, output: "x" })));
+    expect(renderAnnotations(beaucoup).filter((l) => l.startsWith("::error"))).toHaveLength(ANNOTATIONS_PAR_NIVEAU);
+  });
+
+  it("deux checks du même nom : l'état compact garde le pire", () => {
+    const r = buildReport([{ name: "lint", status: "failed", output: "" }, { name: "lint", status: "passed", output: "" }]);
+    expect(etatCompact(r).checks.lint).toBe("failed");
+  });
+
+  it("échappement des propriétés : `:` et `,` ne coupent pas un titre", () => {
+    expect(escapeProperty("a:b,c%")).toBe("a%3Ab%2Cc%25");
+    expect(escapeData("a:b\r\nc")).toBe("a:b%0D%0Ac");
   });
 });

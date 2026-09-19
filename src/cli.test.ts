@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { check } from "./cli.js";
+import { check, sortieGitHub } from "./cli.js";
 
 /**
  * Validation de bout en bout sur PLUSIEURS TYPES DE PROJETS.
@@ -341,4 +341,105 @@ describe("configuration", () => {
       expect(await check(dir)).toBeNull();
     } finally { await clean(); }
   }, 30_000);
+});
+
+describe("observation et site — ce que le contrat peut assouplir, et ce qu'il ne peut pas", () => {
+  it("`observation: [probes]` → exit 2 : le juge fonctionnel ne se met pas en sourdine", async () => {
+    const { dir, clean } = await projet({ "gates.json": JSON.stringify({ observation: ["probes"] }) });
+    try {
+      const r = await check(dir);
+      if (!r || !("configError" in r)) throw new Error("attendu configError");
+      expect(r.configError).toMatch(/« probes » ne peut pas être mis en observation/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("une commande rouge en observation → signalée, verdict vert", async () => {
+    const { dir, clean } = await projet({
+      "gates.json": JSON.stringify({
+        commands: { lint: `node -e "process.exit(1)"` },
+        observation: ["lint"],
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "lint").status).toBe("warn");
+      expect(r.ok).toBe(true);
+      expect(r.report.summary).toMatch(/1 signalé/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("clé inconnue dans `site` → exit 2, nommée", async () => {
+    const { dir, clean } = await projet({ "gates.json": JSON.stringify({ site: { bloquants: ["a11y"] } }) });
+    try {
+      const r = await check(dir);
+      if (!r || !("configError" in r)) throw new Error("attendu configError");
+      expect(r.configError).toMatch(/clé inconnue « bloquants »/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("un projet sans site ne voit jamais les contrôles de site", async () => {
+    const { dir, clean } = await projet({
+      "src/main.mjs": `console.log("ok");\n`,
+      "gates.json": JSON.stringify({ entry: "src/main.mjs", roots: ["src"] }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) expect(byName(r, f), f).toBeUndefined();
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("un site dont le smoke est rouge n'est PAS audité : un audit sur une page cassée ne prouve rien", async () => {
+    const { dir, clean } = await projet({
+      // L'appli démarre (« / » répond) mais la route déclarée n'est pas montée : le smoke
+      // est rouge alors que la page d'accueil, elle, serait auditable.
+      "serveur.mjs": `import { createServer } from "node:http";\ncreateServer((q, s) => { s.statusCode = q.url === "/" ? 200 : 404; s.end("<h1>ok</h1>"); }).listen(38493);\nprocess.on("SIGTERM", () => process.exit(0));\n`,
+      "gates.json": JSON.stringify({
+        app: { start: "node serveur.mjs", url: "http://127.0.0.1:38493/", readyTimeoutMs: 20000, paths: ["/reservation"] },
+        site: {},
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "smoke").status).toBe("failed");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) {
+        expect(byName(r, f).status, f).toBe("skipped");
+        expect(byName(r, f).output).toMatch(/smoke n'est pas vert/);
+      }
+    } finally { await clean(); }
+  }, 60_000);
+});
+
+describe("sortie sous GitHub Actions", () => {
+  it("stop-commands AVANT, puis le même jeton pour rétablir, puis les annotations", () => {
+    const sortie: string[] = [];
+    const gh = sortieGitHub(false, { GITHUB_ACTIONS: "true" }, (s) => sortie.push(s));
+    gh.ouvrir();
+    gh.fermer(["::notice title=gates etat::{}"]);
+    const [ouverture, fermeture] = sortie;
+    const jeton = ouverture.match(/^::stop-commands::([0-9a-f-]{36})\n$/)?.[1];
+    expect(jeton).toBeTruthy();
+    expect(fermeture).toBe(`::${jeton}::\n::notice title=gates etat::{}\n`);
+  });
+
+  it("jeton imprévisible : deux exécutions, deux jetons", () => {
+    const jetons = [0, 1].map(() => {
+      const s: string[] = [];
+      sortieGitHub(false, { GITHUB_ACTIONS: "true" }, (x) => s.push(x)).ouvrir();
+      return s[0];
+    });
+    expect(jetons[0]).not.toBe(jetons[1]);
+  });
+
+  it("hors GitHub Actions, ou en --json : rien n'est ajouté à la sortie", () => {
+    for (const [json, env] of [[false, {}], [true, { GITHUB_ACTIONS: "true" }]] as const) {
+      const s: string[] = [];
+      const gh = sortieGitHub(json, env, (x) => s.push(x));
+      gh.ouvrir();
+      gh.fermer(["x"]);
+      expect(s).toEqual([]);
+    }
+  });
 });

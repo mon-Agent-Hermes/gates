@@ -197,6 +197,81 @@ qu'on lit. `$COV` (le dossier de mesure) est utilisable dans les commandes de pr
 - **Navigateur** : non instrumenté (exige CDP + source maps). Signalé comme mesure
   incomplète, jamais compté comme du code mort.
 
+## Signalé : l'état `warn` et `observation`
+
+Depuis le 19/09/2026, un check peut rendre **`warn`** — *signalé, ne bloque pas* — à côté de
+`passed`, `failed` et `skipped`. `warn` ne change ni `ok` ni le code de sortie ; il apparaît
+dans la sortie (`! a11y — warn (signalé, ne bloque pas)`) et dans le résumé (`2 signalé(s)`).
+
+C'est l'état des contrôles **en observation** : tout contrôle neuf signale d'abord, et ne bloque
+qu'après plusieurs projets sans faux positif (`ROADMAP.md`, chantier 9, règle 3). Pour mettre
+une commande déclarée en observation — un linter qu'on vient de poser :
+
+```json
+{ "commands": { "lint": "npm run lint" }, "observation": ["lint"] }
+```
+
+⚠️ **Le juge fonctionnel ne se met pas en observation.** `probes`, `smoke`, `page`,
+`deliverables`, `assembly`, `coverage` et `spec-coverage` listés dans `observation` → exit 2 :
+un contrat approuvé trop vite ne doit pas pouvoir éteindre le juge.
+
+## Contrôles de site (chantier 9)
+
+Actifs **seulement** quand le projet déclare un site — une section `site`, ou `app.page` — et
+**seulement après un `smoke` vert** : un audit d'accessibilité vert sur une page noire est un
+faux vert. Un CLI, une API, un projet Python ne les voient jamais.
+
+Quatre checks, un par famille, dans un vrai Chrome :
+
+| Check | Ce qui est mesuré | Règles |
+|---|---|---|
+| `a11y` | axe-core, messages en français | toute règle d'axe (`a11y:image-alt`, `a11y:label`…) ; **seules les violations `serious` et `critical` peuvent bloquer** |
+| `mobile` | la page à 375 px de large | `mobile:viewport` (balise absente), `mobile:scroll-horizontal` (avec l'élément d'où part le débordement) |
+| `budgets` | octets transférés, vus par la page | `budgets:poids`, `budgets:js`, `budgets:image` — jamais un score qui fluctue |
+| `seo` | le document | `seo:title`, `seo:description`, `seo:h1` (exactement un) |
+
+**Par défaut, rien ne bloque** : chaque constat est signalé. Une règle ne bloque que si le
+contrat la liste — donc après un `!approuve` humain :
+
+```json
+{
+  "site": {
+    "pages": ["/", "/contact"],
+    "bloquant": ["a11y", "mobile:viewport", "seo:title"],
+    "budgets": { "poidsKo": 1500, "jsKo": 400, "imageKo": 500 },
+    "waitMs": 1500
+  }
+}
+```
+
+`bloquant` accepte une famille entière (`a11y`, `mobile`, `budgets`, `seo`) ou une règle
+(`famille:règle`). Toute clé inconnue, toute règle inconnue → exit 2 : une faute de frappe ne
+doit pas rendre une règle bloquante inopérante. Chaque constat dit la règle, la page, les
+éléments fautifs et la correction attendue.
+
+## Couverture navigateur (chantier 7)
+
+Les probes `browser` sont instrumentées depuis le 19/09/2026 (`page.coverage` de puppeteer) :
+un script servi **tel qu'il est dans le dépôt** (`/app.js` → `public/app.js`) compte comme
+exécuté, au même titre que le code d'un serveur. Ce qui ne se rattache pas à un seul fichier du
+projet — un bundle, faute de source maps, ou un nom ambigu — rend la mesure incomplète, et le
+verdict se suspend plutôt que de déclarer morts des fichiers qu'on n'a pas su observer.
+
+## Sous GitHub Actions : sortie protégée, état annoté
+
+Quand `GITHUB_ACTIONS=true` (et hors `--json`), `gates check` :
+
+1. suspend les commandes de workflow (`::stop-commands::<jeton aléatoire>`) **avant** de lancer
+   quoi que ce soit du projet : ce que le code jugé imprime ne peut plus passer pour une
+   annotation du juge ;
+2. les rétablit avec le même jeton une fois le rapport écrit ;
+3. émet une annotation `notice` titrée **`gates etat`**, portant en JSON l'état de chaque critère
+   et de chaque check — c'est ce que le pont lit pour juger un brief de nuit —, puis une `error`
+   par critère non vérifié et par check rouge (10 au plus, la limite de GitHub par étape), et
+   une `warning` par check signalé.
+
+Le code de sortie ne change pas. `AC-5` de la spec de `gates` le vérifie.
+
 ## Verdict par critère
 
 Le JSON et la sortie texte portent un bloc `criteria` : l'état de chaque `AC-n`, qui est

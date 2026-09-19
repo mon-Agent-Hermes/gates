@@ -35,6 +35,13 @@
       "kind": "cli",
       "run": "cd fixtures/projet-config-invalide && node ../../bin/gates.mjs check",
       "expect": { "exitCode": 2, "stderr": "/clé inconnue « json »/" }
+    },
+    {
+      "id": "sous-github-sortie-protegee-et-annotee",
+      "criterion": "AC-5",
+      "kind": "cli",
+      "run": "node fixtures/sous-github.mjs",
+      "expect": { "exitCode": 0, "stdout": "/::stop-commands::[0-9a-f-]{36}[\\s\\S]*::[0-9a-f-]{36}::[\\s\\S]*::notice title=gates etat::/" }
     }
   ],
   "coverage": {

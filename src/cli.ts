@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,7 +15,11 @@ import {
 } from "./coverage.js";
 import type { PageRequirements } from "./page-check.js";
 import type { CheckResult } from "./types.js";
-import { buildCriteria, buildReport, renderText, type GatesReport } from "./report.js";
+import {
+  applyObservation, buildCriteria, buildReport, escapeData, escapeProperty, NOT_OBSERVABLE,
+  renderAnnotations, renderText, type GatesReport,
+} from "./report.js";
+import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } from "./site-check.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).
@@ -40,6 +45,17 @@ export type GatesConfig = {
   coverage?: CoverageConfig;
   /** Fichier des critères d'acceptation pour `spec-coverage` (défaut `spec.md`). */
   specFile?: string;
+  /**
+   * Contrôles de site (accessibilité, mobile, budgets, référencement). Actifs quand cette
+   * section existe, ou quand `app.page` déclare une page à rendre. Tout y est SIGNALÉ par
+   * défaut ; seul ce que `site.bloquant` liste peut bloquer.
+   */
+  site?: SiteConfig;
+  /**
+   * Checks EN OBSERVATION : rouges, ils sont signalés (`warn`) sans bloquer. Pour un
+   * contrôle neuf — un linter qu'on vient de poser. Jamais le juge fonctionnel.
+   */
+  observation?: string[];
 };
 
 async function loadConfig(dir: string): Promise<GatesConfig | null> {
@@ -59,7 +75,22 @@ async function loadConfig(dir: string): Promise<GatesConfig | null> {
  * une faute de config — pas à l'évaluation, où elle n'est déjà plus rien.
  */
 function validateConfig(cfg: GatesConfig): string[] {
-  return validateProbes(cfg.probes);
+  return [...validateProbes(cfg.probes), ...validateSite(cfg.site), ...validateObservation(cfg.observation)];
+}
+
+/**
+ * `observation` ne peut viser que ce qui n'est pas le juge fonctionnel. L'accepter sur
+ * `probes` ferait d'un contrat approuvé trop vite un contrat qui ne juge plus rien.
+ */
+function validateObservation(obs: unknown): string[] {
+  if (obs === undefined) return [];
+  if (!Array.isArray(obs)) return ["observation : une liste de noms de checks est attendue"];
+  const errors: string[] = [];
+  for (const n of obs) {
+    if (typeof n !== "string" || !n) errors.push("observation : un nom de check est attendu");
+    else if (NOT_OBSERVABLE.has(n)) errors.push(`observation : « ${n} » ne peut pas être mis en observation — c'est le juge fonctionnel`);
+  }
+  return errors;
 }
 
 /**
@@ -156,7 +187,11 @@ export async function check(
     const wantSmoke = want("smoke") && !!appCfg;
     const wantProbes = want("probes") && !!cfg.probes?.length;
     const hasServerProbes = (cfg.probes ?? []).some((p) => p.kind === "http" || p.kind === "browser");
-    const needStart = !!appCfg && (wantSmoke || (wantProbes && hasServerProbes));
+    // Contrôles de site : seulement si le projet déclare un site. Un CLI, une API, un
+    // projet Python ne les voient jamais.
+    const siteDeclared = !!appCfg && (cfg.site !== undefined || cfg.app?.page !== undefined);
+    const siteFamilies: Famille[] = siteDeclared ? FAMILLES.filter((f) => want(f)) : [];
+    const needStart = !!appCfg && (wantSmoke || siteFamilies.length > 0 || (wantProbes && hasServerProbes));
     const runProbesHere = async (baseUrl?: string) => {
       probeResults = await runProbesAgainst(cfg.probes!, { dir, baseUrl, coverage: cov ?? undefined });
       checks.push(aggregateProbes(probeResults));
@@ -169,13 +204,22 @@ export async function check(
       const started = await startApp(dir, { ...appCfg, env: cov?.env });
       if ("error" in started) {
         if (wantSmoke) checks.push({ name: "smoke", status: "failed", output: `l'appli n'a pas démarré.\nCommande : ${appCfg.start}\n${started.error}` });
+        for (const f of siteFamilies) checks.push(siteSkipped(f, "l'appli n'a pas démarré"));
         if (wantProbes) await runProbesHere();
       } else {
         try {
-          if (wantSmoke) {
-            checks.push(await smokeAssertions(started.server.baseUrl, {
+          // Le smoke tourne aussi quand seuls les contrôles de site sont demandés : ils
+          // n'ont de sens que sur une page qui rend. Un audit vert sur un écran noir est
+          // un faux vert — l'ordre n'est pas négociable.
+          const smoke = wantSmoke || siteFamilies.length
+            ? await smokeAssertions(started.server.baseUrl, {
               paths: cfg.app!.paths, page: cfg.app!.page, cmd: appCfg.start, startLogs: started.server.logs(),
-            }));
+            })
+            : null;
+          if (wantSmoke && smoke) checks.push(smoke);
+          if (siteFamilies.length) {
+            if (smoke?.status === "passed") checks.push(...await runSiteChecks(started.server.baseUrl, cfg.site ?? {}, siteFamilies));
+            else for (const f of siteFamilies) checks.push(siteSkipped(f, "le smoke n'est pas vert"));
           }
           if (wantProbes) await runProbesHere(started.server.baseUrl);
         } finally {
@@ -227,8 +271,15 @@ export async function check(
   const ranProbes = want("probes") && !!cfg.probes?.length;
   const criteria = ranProbes ? buildCriteria(declaredCriteria.map((c) => c.id), probeResults) : undefined;
 
-  const report = buildReport(checks, criteria);
+  const report = buildReport(applyObservation(checks, cfg.observation), criteria);
   return { ok: report.ok, report };
+}
+
+function siteSkipped(name: Famille, why: string): CheckResult {
+  return {
+    name, status: "skipped", reason: "not-configured",
+    output: `non audité : ${why}. Un audit sur une page qui ne rend pas ne prouverait rien.`,
+  };
 }
 
 function parseArgs(argv: string[]): { json: boolean; only: string[] | null } {
@@ -238,24 +289,56 @@ function parseArgs(argv: string[]): { json: boolean; only: string[] | null } {
   return { json, only };
 }
 
+/**
+ * Sous GitHub Actions, la sortie du juge est protégée et annotée.
+ *
+ *  - `::stop-commands::` AVANT de lancer quoi que ce soit : ce que les processus du projet
+ *    impriment — une sortie de test, une note de probe recopiée dans le rapport — ne peut
+ *    plus passer pour une commande de workflow. Sans ça, une ligne `::error title=gates
+ *    AC-3::…` imprimée par le code jugé se lirait comme un verdict du juge ;
+ *  - les annotations APRÈS, une fois les commandes rétablies : c'est ce que le pont lit
+ *    pour juger un brief de nuit (`renderAnnotations`).
+ *
+ * Le jeton vient de `randomUUID` : le code jugé ne peut pas le deviner pour rétablir les
+ * commandes avant nous.
+ */
+export function sortieGitHub(
+  json: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+  ecrire: (s: string) => void = (s) => { process.stdout.write(s); },
+): { ouvrir: () => void; fermer: (lignes: string[]) => void } {
+  if (env.GITHUB_ACTIONS !== "true" || json) return { ouvrir: () => {}, fermer: () => {} };
+  const jeton = randomUUID();
+  return {
+    ouvrir: () => ecrire(`::stop-commands::${jeton}\n`),
+    fermer: (lignes) => ecrire([`::${jeton}::`, ...lignes].join("\n") + "\n"),
+  };
+}
+
 export async function main(argv: string[]): Promise<number> {
   if (argv[0] !== "check") {
     process.stderr.write("usage : gates check [--json] [--only nom1,nom2]\n");
     return 2;
   }
   const { json, only } = parseArgs(argv.slice(1));
+  const gh = sortieGitHub(json);
+  const erreurConfig = (msg: string) => [`::error title=${escapeProperty("gates config")}::${escapeData(msg)}`];
+  gh.ouvrir();
   const res = await check(process.cwd(), { only });
   if (!res) {
     process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
+    gh.fermer(erreurConfig("aucun gates.json lisible (config invalide, exit 2)"));
     return 2;
   }
   if ("configError" in res) {
     // Une config invalide n'est pas un code rouge : l'agent doit corriger `gates.json`,
     // pas le code. Deux causes distinctes → deux codes de sortie distincts.
     process.stderr.write(`gates : gates.json invalide — ${res.configError}\n`);
+    gh.fermer(erreurConfig(`gates.json invalide — ${res.configError}`));
     return 2;
   }
   process.stdout.write((json ? JSON.stringify(res.report, null, 2) : renderText(res.report)) + "\n");
+  gh.fermer(renderAnnotations(res.report));
   return res.ok ? 0 : 1;
 }
 
