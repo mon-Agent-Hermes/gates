@@ -35,9 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: npm
@@ -47,7 +49,7 @@ jobs:
       # en CI on veut qu'il tranche, donc on l'installe.
       - name: Installer Chrome (gate de rendu)
         id: chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@c785b87e244131f27c9f19c1a33e2ead956ab7ce # v1.7.3
 
       - name: Dépendances
         run: npm ci
@@ -73,8 +75,9 @@ jobs:
             else
               # La plage sed va jusqu'à la fin, donc elle inclut déjà le verdict.
               # Repli sur la dernière ligne quand le projet ne déclare aucun critère.
-              sed -n "/^Critères d'acceptation/,\$p" gates-output.txt > /tmp/crit.txt
-              if [ -s /tmp/crit.txt ]; then cat /tmp/crit.txt; else tail -n 1 gates-output.txt; fi
+              # Les lignes `::…` sont les commandes de workflow du juge (annotations) : pas du résumé.
+              grep -v '^::' gates-output.txt | sed -n "/^Critères d'acceptation/,\$p" > /tmp/crit.txt || true
+              if [ -s /tmp/crit.txt ]; then cat /tmp/crit.txt; else grep -v '^::' gates-output.txt | tail -n 1; fi
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -83,7 +86,7 @@ jobs:
       # correction quand la boucle longue vire au rouge (§6.3, règle n°5).
       - name: Conserver le rapport
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gates-report
           path: gates-output.txt

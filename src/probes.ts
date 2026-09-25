@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { startApp, probeUrl } from "./sandbox.js";
 import { observePage, classifyPage, type PageRequirements, type PageAction } from "./page-check.js";
-import { countCoverageFiles, noteServerCoverage, type CoverageContext } from "./coverage.js";
+import { countCoverageFiles, listFiles, noteServerCoverage, type CoverageContext } from "./coverage.js";
 import type { CheckResult } from "./types.js";
 
 export type { CoverageContext };
@@ -279,9 +279,15 @@ async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: Co
     const res = await execa(expand(p.run, tmp, cov), {
       cwd: dir, // la probe s'exécute DANS le projet, pas dans le dossier d'où `gates` est lancé
       shell: true, reject: false, all: true, timeout: timeoutMs,
+      // `FORCE_COLOR: "0"` comme pour l'app partagée (`startApp`) : sans lui, un
+      // `console.log("x", 42)` de Node rend « x \e[33m42\e[39m », et un `expect.stdout`
+      // compare du texte truffé de codes ANSI. Le résultat dépend alors de la machine —
+      // vert ici, rouge en CI — donc d'un échec qu'on ne peut pas reproduire, et sur
+      // lequel l'agent boucle à l'aveugle.
+      //
       // Instrumentation du runtime déclaré (§2.6) : le process écrit sa couverture
       // dans `$COV` à sa sortie — d'où l'exigence d'une sortie PROPRE.
-      env: cov?.env,
+      env: { FORCE_COLOR: "0", ...cov?.env },
     });
     if (exp.exitCode !== undefined && res.exitCode !== exp.exitCode) {
       reasons.push(`code de sortie ${res.exitCode} (attendu ${exp.exitCode})`);
@@ -316,7 +322,7 @@ async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, dir: string
     if (p.run) await execa(expand(p.run, tmp, cov), {
       cwd: dir,
       shell: true, reject: false, all: true, timeout: timeoutMs,
-      env: cov?.env,
+      env: { FORCE_COLOR: "0", ...cov?.env },
     });
     const fp = expand(p.file, tmp, cov);
     let size = -1;
@@ -411,7 +417,11 @@ async function runHttpProbe(p: HttpProbe, baseUrl: string): Promise<ProbeResult>
   return reasons.length ? fail(p, `${method} ${p.request.path} : ${reasons.join(" ; ")}`) : pass(p, `${method} ${p.request.path} → ${status}`);
 }
 
-async function runBrowserProbe(p: BrowserProbe, baseUrl: string): Promise<ProbeResult> {
+async function runBrowserProbe(
+  p: BrowserProbe,
+  baseUrl: string,
+  cov?: { ctx: CoverageContext; projectDir: string; projectFiles: string[] },
+): Promise<ProbeResult> {
   const req: PageRequirements = {
     requireSelectors: p.expect?.requireSelectors,
     requireCanvas: p.expect?.requireCanvas,
@@ -423,11 +433,24 @@ async function runBrowserProbe(p: BrowserProbe, baseUrl: string): Promise<ProbeR
   const url = probeUrl(baseUrl, p.path ?? "/");
   let obs;
   try {
-    obs = await observePage(url, req, p.actions ?? []);
+    obs = await observePage(url, req, p.actions ?? [],
+      cov ? { dir: cov.ctx.dir, projectDir: cov.projectDir, projectFiles: cov.projectFiles } : undefined);
   } catch (e: any) {
+    cov?.ctx.incomplete.push(`la probe « ${p.id} » n'a pas pu ouvrir la page : couverture navigateur non mesurée`);
     return fail(p, `contrôle de page impossible : ${e?.message ?? e}`);
   }
-  if (!obs) return skip(p, "aucun Chrome/Edge sur la machine (probe browser ignorée)");
+  if (!obs) {
+    cov?.ctx.incomplete.push(`la probe « ${p.id} » n'a pas tourné (aucun Chrome) : couverture navigateur non mesurée`);
+    return skip(p, "aucun Chrome/Edge sur la machine (probe browser ignorée)");
+  }
+  // Un script servi sans fichier du projet correspondant (un bundle) : on ne sait pas ce
+  // qu'il contient, donc la mesure est incomplète — jamais un faux rouge sur ses sources.
+  if (cov && obs.coverage?.unattached.length) {
+    cov.ctx.incomplete.push(
+      `la probe « ${p.id} » exécute des scripts sans fichier source dans le projet (${obs.coverage.unattached.slice(0, 3).join(", ")}) — ` +
+      `sers les sources telles quelles, ou la couverture navigateur ne peut pas les rattacher`,
+    );
+  }
   const { passed, reasons } = classifyPage(obs, req);
   return passed ? pass(p, `page rendue (${obs.drawCalls} appel(s) de dessin)`) : fail(p, reasons.join(" ; "));
 }
@@ -472,11 +495,12 @@ export async function runProbesAgainst(
     else if (p.kind !== "http" && p.kind !== "browser") results[i] = skip(p, `kind « ${p.kind} » inconnu`);
   }
 
-  // Le pilotage NAVIGATEUR n'est pas encore instrumenté (il exige CDP + source maps) :
-  // les fichiers qui ne s'exécutent que là paraîtraient morts. On le signale.
-  if (cov && probes.some((p) => p.kind === "browser")) {
-    cov.incomplete.push("les probes « browser » ne sont pas instrumentées (couverture navigateur non portée)");
-  }
+  // Le pilotage NAVIGATEUR est instrumenté par CDP (`page.coverage`) : les scripts servis
+  // tels qu'ils sont dans le dépôt comptent comme exécutés. Ce qui ne se rattache pas à un
+  // fichier du projet — un bundle, faute de source maps — rend la mesure incomplète.
+  const browserCov = cov && probes.some((p) => p.kind === "browser")
+    ? { ctx: cov, projectDir: dir, projectFiles: await listFiles(dir) }
+    : undefined;
 
   // 2. Probes serveur (http, browser) : contre l'app déjà démarrée.
   const serverProbes = probes.map((p, i) => ({ p, i })).filter((x) => x.p.kind === "http" || x.p.kind === "browser");
@@ -487,7 +511,7 @@ export async function runProbesAgainst(
     }
     results[i] = p.kind === "http"
       ? await runHttpProbe(p as HttpProbe, opts.baseUrl)
-      : await runBrowserProbe(p as BrowserProbe, opts.baseUrl);
+      : await runBrowserProbe(p as BrowserProbe, opts.baseUrl, browserCov);
   }
 
   return results.map((r, i) => r ?? skip(probes[i], "non exécutée"));

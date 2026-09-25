@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { check } from "./cli.js";
+import { annotationsDuVerdict, check, sortieGitHub } from "./cli.js";
+import { buildCriteria, buildReport } from "./report.js";
 
 /**
  * Validation de bout en bout sur PLUSIEURS TYPES DE PROJETS.
@@ -341,4 +342,200 @@ describe("configuration", () => {
       expect(await check(dir)).toBeNull();
     } finally { await clean(); }
   }, 30_000);
+});
+
+describe("observation et site — ce que le contrat peut assouplir, et ce qu'il ne peut pas", () => {
+  it("`observation: [probes]` → exit 2 : le juge fonctionnel ne se met pas en sourdine", async () => {
+    const { dir, clean } = await projet({ "gates.json": JSON.stringify({ observation: ["probes"] }) });
+    try {
+      const r = await check(dir);
+      if (!r || !("configError" in r)) throw new Error("attendu configError");
+      expect(r.configError).toMatch(/« probes » ne peut pas être mis en observation/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("une commande rouge en observation → signalée, verdict vert", async () => {
+    const { dir, clean } = await projet({
+      "gates.json": JSON.stringify({
+        commands: { lint: `node -e "process.exit(1)"` },
+        observation: ["lint"],
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "lint").status).toBe("warn");
+      expect(r.ok).toBe(true);
+      expect(r.report.summary).toMatch(/1 signalé/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("clé inconnue dans `site` → exit 2, nommée", async () => {
+    const { dir, clean } = await projet({ "gates.json": JSON.stringify({ site: { bloquants: ["a11y"] } }) });
+    try {
+      const r = await check(dir);
+      if (!r || !("configError" in r)) throw new Error("attendu configError");
+      expect(r.configError).toMatch(/clé inconnue « bloquants »/);
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("un projet sans site ne voit jamais les contrôles de site", async () => {
+    const { dir, clean } = await projet({
+      "src/main.mjs": `console.log("ok");\n`,
+      "gates.json": JSON.stringify({ entry: "src/main.mjs", roots: ["src"] }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) expect(byName(r, f), f).toBeUndefined();
+    } finally { await clean(); }
+  }, 30_000);
+
+  it("un site dont le smoke est rouge n'est PAS audité : un audit sur une page cassée ne prouve rien", async () => {
+    const { dir, clean } = await projet({
+      // L'appli démarre (« / » répond) mais la route déclarée n'est pas montée : le smoke
+      // est rouge alors que la page d'accueil, elle, serait auditable.
+      "serveur.mjs": `import { createServer } from "node:http";\ncreateServer((q, s) => { s.statusCode = q.url === "/" ? 200 : 404; s.end("<h1>ok</h1>"); }).listen(38493);\nprocess.on("SIGTERM", () => process.exit(0));\n`,
+      "gates.json": JSON.stringify({
+        app: { start: "node serveur.mjs", url: "http://127.0.0.1:38493/", readyTimeoutMs: 20000, paths: ["/reservation"] },
+        site: {},
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "smoke").status).toBe("failed");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) {
+        expect(byName(r, f).status, f).toBe("skipped");
+        expect(byName(r, f).output).toMatch(/smoke n'est pas vert/);
+      }
+    } finally { await clean(); }
+  }, 60_000);
+});
+
+describe("sortie sous GitHub Actions", () => {
+  it("stop-commands AVANT, puis le même jeton pour rétablir, puis les annotations", () => {
+    const sortie: string[] = [];
+    const gh = sortieGitHub(false, { GITHUB_ACTIONS: "true" }, (s) => sortie.push(s));
+    gh.ouvrir();
+    gh.fermer(["::notice title=gates etat::{}"]);
+    const [ouverture, fermeture] = sortie;
+    const jeton = ouverture.match(/^::stop-commands::([0-9a-f-]{36})\n$/)?.[1];
+    expect(jeton).toBeTruthy();
+    expect(fermeture).toBe(`::${jeton}::\n::notice title=gates etat::{}\n`);
+  });
+
+  it("jeton imprévisible : deux exécutions, deux jetons", () => {
+    const jetons = [0, 1].map(() => {
+      const s: string[] = [];
+      sortieGitHub(false, { GITHUB_ACTIONS: "true" }, (x) => s.push(x)).ouvrir();
+      return s[0];
+    });
+    expect(jetons[0]).not.toBe(jetons[1]);
+  });
+
+  it("hors GitHub Actions, ou en --json : rien n'est ajouté à la sortie", () => {
+    for (const [json, env] of [[false, {}], [true, { GITHUB_ACTIONS: "true" }]] as const) {
+      const s: string[] = [];
+      const gh = sortieGitHub(json, env, (x) => s.push(x));
+      gh.ouvrir();
+      gh.fermer(["x"]);
+      expect(s).toEqual([]);
+    }
+  });
+
+  it("seule la vérification principale annote : une `gates etat` par job, pas trois", () => {
+    const rapport = buildReport(
+      [{ name: "probes", status: "failed", output: "AC-2 : 404" }],
+      buildCriteria(["AC-1", "AC-2"], [
+        { id: "a", criterion: "AC-1", status: "passed" },
+        { id: "b", criterion: "AC-2", status: "failed", output: "GET / → 404" },
+      ]),
+    );
+    const principale = annotationsDuVerdict(rapport, { baseUrl: null, phaseRouge: false });
+    expect(principale.filter((l) => l.startsWith("::notice title=gates etat::"))).toHaveLength(1);
+    expect(principale.some((l) => l.startsWith("::error title=gates AC-2::"))).toBe(true);
+    // Phase rouge : AC-2 rouge y est ATTENDU — le remonter en échec tromperait le pont.
+    expect(annotationsDuVerdict(rapport, { baseUrl: null, phaseRouge: true })).toEqual([]);
+    expect(annotationsDuVerdict(rapport, { baseUrl: "https://apercu.example", phaseRouge: false })).toEqual([]);
+  });
+});
+
+/**
+ * La phase rouge, de bout en bout — LE scénario qui justifie tout ce fichier.
+ *
+ * Le projet ci-dessous est TOUT VERT au sens du juge ordinaire : 2 critères sur 2
+ * vérifiés. Et l'un des deux est un mensonge — sa probe passerait sur un dépôt vide.
+ * C'est exactement le faux vert que `VALIDATION.md` a mesuré, remonté d'un cran : ce
+ * n'est plus le modèle qui se déclare fini, c'est la probe qui se déclare probante.
+ */
+describe("phase rouge — la probe qui ne constate rien", () => {
+  const base: Files = {
+    "spec.md": "# Spec\n\n- **AC-1** — la commande double son entrée.\n- **AC-2** — le projet est livrable.\n",
+    "src/calcul.mjs": "export const doubler = (n) => n * 2;\n",
+    "src/main.mjs": 'import { doubler } from "./calcul.mjs";\nconsole.log("resultat", doubler(21));\n',
+    "gates.json": JSON.stringify({
+      roots: ["src"],
+      probes: [
+        { id: "double-bien", criterion: "AC-1", kind: "cli", run: "node src/main.mjs", expect: { exitCode: 0, stdout: "resultat 42" } },
+        // Ne touche jamais au projet : elle rend AC-2 vert en n'observant rien.
+        { id: "probe-creuse", criterion: "AC-2", kind: "cli", run: "node -e \"console.log('ok')\"", expect: { exitCode: 0, stdout: "ok" } },
+      ],
+    }),
+  };
+
+  it("le run ordinaire est TOUT VERT — c'est le problème, pas le résultat", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(r.ok, JSON.stringify(r.report.criteria)).toBe(true);
+      expect(r.report.criteria?.["AC-2"].status).toBe("passed");
+    } finally {
+      await clean();
+    }
+  });
+
+  it("la phase rouge dénonce la probe creuse, et NOMME son critère", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir, { phaseRouge: true });
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(r.ok).toBe(false);
+      const c = byName(r, "phase-rouge");
+      expect(c.status).toBe("failed");
+      expect(c.output).toContain("probe-creuse");
+      expect(c.output).toContain("AC-2");
+      // La probe honnête ne doit pas être mise en cause : une phase rouge qui accuse
+      // tout le monde n'apprend rien et se fait désactiver.
+      expect(c.output).not.toContain("double-bien");
+    } finally {
+      await clean();
+    }
+  });
+
+  it("le projet d'origine sort INTACT d'une phase rouge", async () => {
+    // L'invariant qui prime sur le verdict : le juge travaille sur une copie. S'il
+    // abîmait le dépôt, il coûterait du travail réel — le seul défaut de cet outil qui
+    // ne se rattrape pas par une relecture.
+    const { dir, clean } = await projet(base);
+    try {
+      await check(dir, { phaseRouge: true });
+      const { readFile } = await import("node:fs/promises");
+      expect(await readFile(join(dir, "src/calcul.mjs"), "utf8")).toBe(base["src/calcul.mjs"]);
+      expect(await readFile(join(dir, "src/main.mjs"), "utf8")).toBe(base["src/main.mjs"]);
+    } finally {
+      await clean();
+    }
+  });
+
+  it("--phase-rouge et --base-url s'excluent (config invalide)", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir, { phaseRouge: true, baseUrl: "https://apercu.example/" });
+      expect(r && "configError" in r).toBe(true);
+    } finally {
+      await clean();
+    }
+  });
 });

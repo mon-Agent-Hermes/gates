@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { writeBrowserCoverage, type BrowserCoverageContext } from "./coverage.js";
 import type { CheckResult } from "./types.js";
 
 /**
@@ -56,6 +57,8 @@ export type PageObservation = {
   missingSelectors: string[];
   canvas: { present: boolean; width: number; height: number; context: string | null };
   drawCalls: number;
+  /** Couverture navigateur, quand elle a été demandée : ce qui s'est rattaché, et ce qui non. */
+  coverage?: { attached: string[]; unattached: string[] };
 };
 
 /**
@@ -201,6 +204,7 @@ export async function observePage(
   url: string,
   req: PageRequirements = {},
   actions: PageAction[] = [],
+  coverage?: BrowserCoverageContext,
 ): Promise<PageObservation | null> {
   const executablePath = findChrome();
   if (!executablePath) return null;
@@ -220,6 +224,10 @@ export async function observePage(
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 720 });
     await page.evaluateOnNewDocument(INSTRUMENT);
+    // Couverture navigateur (chantier 7) : démarrée AVANT la navigation, pour que le code
+    // exécuté au chargement compte. `resetOnNavigation: false` garde ce qu'une action
+    // aurait déclenché après une redirection.
+    if (coverage) await page.coverage.startJSCoverage({ resetOnNavigation: false, includeRawScriptCoverage: true });
     page.on("console", (m: any) => {
       const text = String(m.text());
       if (m.type() === "error" && isRelevantConsoleError(text)) consoleErrors.push(text.slice(0, 300));
@@ -278,8 +286,13 @@ export async function observePage(
       };
     }, selectors);
 
+    const couverture = coverage
+      ? await writeBrowserCoverage(await page.coverage.stopJSCoverage(), url, coverage)
+      : undefined;
+
     return {
       url,
+      coverage: couverture,
       title: facts.title,
       consoleErrors,
       pageErrors,

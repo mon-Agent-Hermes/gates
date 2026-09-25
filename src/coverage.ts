@@ -1,6 +1,7 @@
-import { readdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { CheckResult } from "./types.js";
 
 /**
@@ -453,6 +454,20 @@ export async function checkCoverage(input: CoverageVerdictInput): Promise<CheckR
     return { name: "coverage", status: "skipped", reason: "not-configured", output: "aucun requireExecuted déclaré" };
   }
   if (data.sources === 0) {
+    // Quand on SAIT déjà pourquoi rien n'a été mesuré — un site jugé à distance, un
+    // serveur tué de force —, le dire. Le conseil « vérifie que tes probes lancent bien
+    // le code instrumenté » enverrait sinon l'agent corriger des probes qui n'ont rien :
+    // un message faux coûte plus cher qu'un message absent, il fait boucler.
+    if (input.incomplete?.length) {
+      return {
+        name: "coverage",
+        status: "skipped",
+        reason: "not-configured",
+        output:
+          `mesure INCOMPLÈTE, verdict suspendu (pas de faux rouge) : ${input.incomplete.join(" ; ")}. ` +
+          `Aucune donnée de couverture n'a été produite ici — les probes ne sont pas en cause.`,
+      };
+    }
     return {
       name: "coverage",
       status: "skipped",
@@ -461,7 +476,7 @@ export async function checkCoverage(input: CoverageVerdictInput): Promise<CheckR
         `aucune donnée de couverture produite (runtime « ${cfg.runtime ?? "node"} »). ` +
         `Vérifie que les probes lancent bien le code instrumenté — ` +
         `Node : sortie propre du process ; Python : « python -m coverage run --parallel-mode … » ; ` +
-        `Go : binaire construit avec « go build -cover ». Le pilotage navigateur n'est pas encore instrumenté.`,
+        `Go : binaire construit avec « go build -cover » ; navigateur : des scripts servis tels qu'ils sont dans le dépôt.`,
     };
   }
 
@@ -506,4 +521,69 @@ export async function checkCoverage(input: CoverageVerdictInput): Promise<CheckR
     status: "passed",
     output: `${required.length} livrable(s) requis, tous exécutés pendant les probes${note}`,
   };
+}
+
+// ── Couverture NAVIGATEUR (chantier 7) ───────────────────────────────────────────
+
+/** Une entrée de `page.coverage.stopJSCoverage()` avec `includeRawScriptCoverage`. */
+export type BrowserScriptCoverage = { url: string; rawScriptCoverage?: { functions?: unknown[] } };
+
+export type BrowserCoverageContext = { dir: string; projectDir: string; projectFiles: string[] };
+
+/**
+ * Le fichier du projet qu'un chemin SERVI désigne. Un serveur statique sert `public/app.js`
+ * sous `/app.js` : le chemin servi est un suffixe du fichier, l'inverse du cas Go que
+ * traite `toProjectFile`. Deux candidats (`public/app.js` et `src/app.js`) → `null` : on ne
+ * devine pas lequel a tourné, la mesure sera dite incomplète.
+ */
+export function servedToProjectFile(served: string, projectFiles: string[]): string | null {
+  const path = served.replace(/^\/+/, "");
+  if (!path || path.split("/").includes("..")) return null;
+  if (projectFiles.includes(path)) return path;
+  const candidates = projectFiles.filter((f) => f.endsWith("/" + path));
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+/**
+ * Rattache la couverture d'une page aux fichiers du projet et l'écrit dans `$COV`, au
+ * format V8 que `readV8` lit déjà : un script servi en `/src/jeu.js` devient
+ * `file://…/src/jeu.js`. Rien de nouveau à lire, donc rien de nouveau à croire.
+ *
+ * Ce qui ne se rattache pas est RENDU, pas ignoré : un bundle (`/assets/index-3f2a.js`)
+ * n'a pas de fichier source correspondant, et sans source maps on ne sait pas quels
+ * fichiers il contient. L'appelant en fait une mesure incomplète — le verdict se suspend
+ * plutôt que de déclarer morts des fichiers qu'on n'a pas su observer.
+ *
+ * Les scripts d'une autre origine (CDN) ne sont pas du projet ; les scripts en ligne,
+ * servis dans la page HTML elle-même, non plus au sens de `requireExecuted`.
+ */
+export async function writeBrowserCoverage(
+  entries: BrowserScriptCoverage[],
+  pageUrl: string,
+  ctx: BrowserCoverageContext,
+): Promise<{ attached: string[]; unattached: string[] }> {
+  let origin: string;
+  try { origin = new URL(pageUrl).origin; } catch { return { attached: [], unattached: [] }; }
+  const result: { url: string; functions: unknown[] }[] = [];
+  const attached: string[] = [];
+  const unattached: string[] = [];
+  for (const e of entries) {
+    let u: URL;
+    try { u = new URL(e.url); } catch { continue; }
+    if (u.origin !== origin || !e.rawScriptCoverage) continue;
+    let path: string;
+    try { path = decodeURIComponent(u.pathname).replace(/^\/+/, ""); } catch { continue; }
+    if (!path || /\.html?$/i.test(path)) continue; // script en ligne : porté par la page
+    const rel = servedToProjectFile(path, ctx.projectFiles);
+    if (!rel) {
+      if (!unattached.includes(u.pathname)) unattached.push(u.pathname);
+      continue;
+    }
+    result.push({ url: pathToFileURL(join(ctx.projectDir, rel)).href, functions: e.rawScriptCoverage.functions ?? [] });
+    if (!attached.includes(rel)) attached.push(rel);
+  }
+  if (result.length) {
+    await writeFile(join(ctx.dir, `coverage-navigateur-${randomUUID()}.json`), JSON.stringify({ result }));
+  }
+  return { attached, unattached };
 }

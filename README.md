@@ -13,6 +13,8 @@ ce qu'aucun juge LLM n'a vu (29 fichiers sur 30 injoignables, écran noir, route
 gates check              # dans un projet portant un gates.json ; lit ./gates.json
 gates check --json       # sortie machine (pour la skill /verify d'Hermes)
 gates check --only assembly,smoke
+gates check --base-url https://apercu.vercel.app/   # juger un site DÉJÀ déployé
+gates check --phase-rouge  # les probes échouent-elles quand le code est vidé ?
 ```
 
 - **exit 0** = tout vert · **exit 1** = au moins un check rouge · **exit 2** = config invalide.
@@ -63,9 +65,43 @@ navigateur classé « API HTTP » parce que la spec contenait le mot *server*).
 | `app.page` | `smoke` | rendu réel dans Chrome headless (canvas, appels de dessin, erreurs console) |
 | `probes` | `probes` | scénarios d'observation de l'artefact (kinds `cli`, `artifact`) — `$TMP` neuf par probe |
 | `specFile` | `spec-coverage` | fichier des `AC-n` (défaut `spec.md`) : chaque critère doit avoir une probe |
+| `docs` | `docs` | la doc **constatée** : fichier présent, sections déclarées, et une probe qui exécute le démarrage qu'il décrit |
 
 Le check `assembly` suit le graphe réel depuis le point d'entrée (`index.html`, sinon
 `src/main.*`) et échoue sur tout livrable jamais atteint — assets CSS compris.
+
+## `--base-url` — juger le site déployé, pas celui que la CI relance
+
+Jusqu'au 25/09/2026, « vert » voulait dire *vert dans la CI* : `gates` démarrait l'app
+lui-même par `app.start`. Le lien qu'on envoie à un client, lui, n'était jugé par
+personne. Entre les deux passent une variable d'environnement absente chez l'hébergeur,
+un chemin d'asset qui ne tient qu'en local, un build de production différent du build de
+développement.
+
+`--base-url <url>` désigne un site **déjà servi**. `app.start` n'est alors **pas lu** —
+on juge ce que le déploiement sert, pas ce que la CI saurait relancer. `app.paths`,
+`app.page` et la section `site` décrivent le site lui-même : ils s'appliquent aux deux
+modes sans changer de sens, et les probes `http`/`browser` sondent l'URL distante.
+
+```bash
+gates check --base-url "$URL" --only smoke,probes,a11y,mobile,budgets,seo
+```
+
+- Le juge **attend** que l'URL réponde (`app.readyTimeoutMs`, 60 s par défaut) : une PR
+  jugée avant la fin du déploiement doit accuser *« le déploiement n'est pas en ligne »*,
+  pas faire croire que le code est rouge.
+- Le rapport dit **ce qui a été jugé** : `déployé : … a répondu`, jamais `démarré`.
+- La **couverture ne peut rien savoir** d'un process distant : elle le dit et **suspend**
+  son verdict, au lieu de déclarer mort tout le projet. La couverture serveur se lit sur
+  le run local, pas sur celui-ci.
+- Une valeur qui n'est pas une URL absolue `http(s)` — y compris `--base-url` sans valeur
+  — est une **config invalide (exit 2)**, jamais un repli silencieux sur `localhost` : un
+  repli rendrait vert un run qui n'a pas regardé ce qu'on lui demandait de regarder.
+
+⚠️ **Le drapeau est générique, son déclenchement ne l'est pas.** Une API déployée ailleurs
+se jugerait de la même façon. Mais le job CI qui le lance automatiquement ne s'active que
+si le contrat déclare un site (`site` ou `app.page`) : un CLI, une API, un projet Python
+n'ont pas de prévisualisation à juger, et n'en verront jamais.
 
 ## Chrome (gate de rendu)
 
@@ -197,6 +233,166 @@ qu'on lit. `$COV` (le dossier de mesure) est utilisable dans les commandes de pr
 - **Navigateur** : non instrumenté (exige CDP + source maps). Signalé comme mesure
   incomplète, jamais compté comme du code mort.
 
+## `--phase-rouge` — qui juge les juges
+
+> Si le même agent écrit le code puis les probes en lisant ce code, les probes vérifient
+> ce que le code **fait**, pas ce qu'il **devrait** faire.
+
+Les probes sont les tests de ce montage, et rien ne vérifiait qu'elles dépendent du code.
+Une probe qui passerait sur un dépôt vide rend son critère vert **sans avoir rien
+constaté** : c'est le défaut d'origine, déplacé d'un cran.
+
+```bash
+gates check --phase-rouge
+```
+
+Les probes sont rejouées sur une **copie** du projet dont les livrables ont été **vidés**,
+et chacune doit **échouer**. Celle qui passe est nommée, avec son critère.
+
+- **Vidés, pas supprimés.** Un fichier absent casse la résolution de modules : la probe
+  échouerait pour une raison sans rapport avec le comportement, et la phase rouge
+  conclurait « tout va bien » sans avoir rien mesuré. Vidé, le module se charge et ne fait
+  rien — l'échec porte alors sur l'absence de **comportement**.
+- **Les cibles viennent du contrat** : `deliverables` s'il est déclaré, sinon les fichiers
+  sous `roots` (défaut `src`). Rien hors de là n'est touché : vider un fichier de
+  configuration ferait échouer les probes pour une raison sans rapport.
+- **Une copie, jamais le dépôt.** Le projet d'origine reste intact. Un juge qui abîme ce
+  qu'il juge est pire que pas de juge. `node_modules` et les autres dossiers lourds ne
+  sont pas recopiés mais restent atteignables : sans eux, chaque probe échouerait faute de
+  dépendances, et la phase rouge se prouverait elle-même vacante.
+- **Une probe ignorée ne prouve rien** : elle est signalée, jamais comptée comme preuve.
+  Toutes ignorées → `skipped`, parce que rien n'a été établi.
+
+⚠️ **Ce qu'elle ne dit pas.** Qu'une probe dépende du code ne prouve pas qu'elle vérifie la
+bonne chose. Elle ferme la probe *creuse*, pas la probe *complaisante* — celle qui constate
+ce que le code fait au lieu de ce que la spec demande. Contre celle-là, le seul rempart est
+l'approbation humaine des critères.
+
+Elle est lancée par la CI, où l'agent ne peut pas la désactiver (modifier un workflow exige
+la permission `Workflows`, que son PAT n'a pas), et démarre en `observation`.
+
+## `docs` — la documentation constatée, pas déclarée
+
+Vérifier une doc de façon déclarative — « il existe un `README.md` » — est le vert vide
+que cet outil refuse partout ailleurs : un agent à qui on demande une documentation écrit
+un fichier d'une ligne et satisfait le contrôle. Et une doc **fausse** coûte plus cher
+qu'une doc absente à celui qui suit ses instructions.
+
+```json
+"docs": {
+  "file": "README.md",
+  "sections": ["Installation", "Démarrage rapide"],
+  "quickstart": "readme-demarrage"
+}
+```
+
+Trois lignes de défense, dont **une seule constate vraiment** :
+
+1. le fichier existe — et quand il manque, la sortie **nomme** celui qu'on attendait
+   (`docs — failed` n'est pas actionnable) ;
+2. il porte de la matière : au moins 200 caractères de contenu **titres exclus**, ce qui
+   ferme le cas retors du plan long qui annonce six sections et n'en écrit aucune ;
+3. `quickstart` nomme **l'id d'une probe** qui joue le démarrage tel que le fichier le
+   décrit. C'est la seule partie qui prouve quelque chose ; le reste ne fait que lire.
+
+```json
+{ "id": "readme-demarrage", "criterion": "AC-8", "kind": "cli",
+  "run": "node bin/cli.mjs init $TMP && node bin/cli.mjs export $TMP/out.pdf",
+  "expect": { "exitCode": 0, "files": ["$TMP/out.pdf"] } }
+```
+
+- **Sans `quickstart`**, le check rend **`warn`**, jamais `passed` : « documenté mais
+  jamais exécuté » est l'état qu'on veut voir signalé. En vert, il serait indiscernable
+  d'une doc prouvée pour tout ce qui lit le *statut* — la CI, le rapport de nuit,
+  l'agrégation —, c'est-à-dire pour tout le monde sauf un humain qui lit le texte.
+- Une probe de quickstart **ignorée** vaut un **échec**, pas un vert : même règle qu'un
+  critère `uncovered`. La sortie le distingue d'un échec d'exécution, pour qu'on ne
+  cherche pas une panne qui n'a pas eu lieu.
+- `quickstart` qui ne désigne **aucune** probe → **exit 2**. Une coquille laisserait la
+  doc « vérifiée » par une probe inexistante, donc verte sans qu'une commande ait tourné.
+- `file` est **verrouillé sous le projet** : un `../../README.md` ferait valider la
+  documentation d'un autre dépôt. Un juge qui lit où on lui dit de lire n'est plus un juge.
+
+`docs` est un contrôle neuf : il peut être mis en `observation` le temps qu'il fasse ses
+preuves. Le seuil de 200 caractères ne mesure pas la qualité — aucun nombre ne le ferait —
+il ferme seulement le README écrit pour passer le contrôle. Ce qui juge la qualité, c'est
+la probe.
+
+## Signalé : l'état `warn` et `observation`
+
+Depuis le 19/09/2026, un check peut rendre **`warn`** — *signalé, ne bloque pas* — à côté de
+`passed`, `failed` et `skipped`. `warn` ne change ni `ok` ni le code de sortie ; il apparaît
+dans la sortie (`! a11y — warn (signalé, ne bloque pas)`) et dans le résumé (`2 signalé(s)`).
+
+C'est l'état des contrôles **en observation** : tout contrôle neuf signale d'abord, et ne bloque
+qu'après plusieurs projets sans faux positif (`ROADMAP.md`, chantier 9, règle 3). Pour mettre
+une commande déclarée en observation — un linter qu'on vient de poser :
+
+```json
+{ "commands": { "lint": "npm run lint" }, "observation": ["lint"] }
+```
+
+⚠️ **Le juge fonctionnel ne se met pas en observation.** `probes`, `smoke`, `page`,
+`deliverables`, `assembly`, `coverage` et `spec-coverage` listés dans `observation` → exit 2 :
+un contrat approuvé trop vite ne doit pas pouvoir éteindre le juge.
+
+## Contrôles de site (chantier 9)
+
+Actifs **seulement** quand le projet déclare un site — une section `site`, ou `app.page` — et
+**seulement après un `smoke` vert** : un audit d'accessibilité vert sur une page noire est un
+faux vert. Un CLI, une API, un projet Python ne les voient jamais.
+
+Quatre checks, un par famille, dans un vrai Chrome :
+
+| Check | Ce qui est mesuré | Règles |
+|---|---|---|
+| `a11y` | axe-core, messages en français | toute règle d'axe (`a11y:image-alt`, `a11y:label`…) ; **seules les violations `serious` et `critical` peuvent bloquer** |
+| `mobile` | la page à 375 px de large | `mobile:viewport` (balise absente), `mobile:scroll-horizontal` (avec l'élément d'où part le débordement) |
+| `budgets` | octets transférés, vus par la page | `budgets:poids`, `budgets:js`, `budgets:image` — jamais un score qui fluctue |
+| `seo` | le document | `seo:title`, `seo:description`, `seo:h1` (exactement un) |
+
+**Par défaut, rien ne bloque** : chaque constat est signalé. Une règle ne bloque que si le
+contrat la liste — donc après un `!approuve` humain :
+
+```json
+{
+  "site": {
+    "pages": ["/", "/contact"],
+    "bloquant": ["a11y", "mobile:viewport", "seo:title"],
+    "budgets": { "poidsKo": 1500, "jsKo": 400, "imageKo": 500 },
+    "waitMs": 1500
+  }
+}
+```
+
+`bloquant` accepte une famille entière (`a11y`, `mobile`, `budgets`, `seo`) ou une règle
+(`famille:règle`). Toute clé inconnue, toute règle inconnue → exit 2 : une faute de frappe ne
+doit pas rendre une règle bloquante inopérante. Chaque constat dit la règle, la page, les
+éléments fautifs et la correction attendue.
+
+## Couverture navigateur (chantier 7)
+
+Les probes `browser` sont instrumentées depuis le 19/09/2026 (`page.coverage` de puppeteer) :
+un script servi **tel qu'il est dans le dépôt** (`/app.js` → `public/app.js`) compte comme
+exécuté, au même titre que le code d'un serveur. Ce qui ne se rattache pas à un seul fichier du
+projet — un bundle, faute de source maps, ou un nom ambigu — rend la mesure incomplète, et le
+verdict se suspend plutôt que de déclarer morts des fichiers qu'on n'a pas su observer.
+
+## Sous GitHub Actions : sortie protégée, état annoté
+
+Quand `GITHUB_ACTIONS=true` (et hors `--json`), `gates check` :
+
+1. suspend les commandes de workflow (`::stop-commands::<jeton aléatoire>`) **avant** de lancer
+   quoi que ce soit du projet : ce que le code jugé imprime ne peut plus passer pour une
+   annotation du juge ;
+2. les rétablit avec le même jeton une fois le rapport écrit ;
+3. émet une annotation `notice` titrée **`gates etat`**, portant en JSON l'état de chaque critère
+   et de chaque check — c'est ce que le pont lit pour juger un brief de nuit —, puis une `error`
+   par critère non vérifié et par check rouge (10 au plus, la limite de GitHub par étape), et
+   une `warning` par check signalé.
+
+Le code de sortie ne change pas. `AC-5` de la spec de `gates` le vérifie.
+
 ## Verdict par critère
 
 Le JSON et la sortie texte portent un bloc `criteria` : l'état de chaque `AC-n`, qui est
@@ -209,8 +405,10 @@ satisfait.
 
 Commandes déclarées · livrables · assemblage statique · smoke (routes + rendu) ·
 probes **`cli` / `artifact` / `http` / `browser` / `process`** · **spec-coverage** ·
-**coverage** (node/python/go/custom) · verdict par critère · harnais serveur (app
-partagée, un seul démarrage). **107 tests verts.**
+**coverage** (node/python/go/custom) · contrôles de site (a11y, mobile, budgets, seo) ·
+**`docs`** · verdict par critère · harnais serveur (app partagée, un seul démarrage) ·
+**`--base-url`** (site déployé) · **`--phase-rouge`** (les probes dépendent-elles du
+code ?). **189 tests**, dont un vrai navigateur quand Chrome est présent.
 
 Validé de bout en bout sur trois types de projets — CLI, générateur d'artefact, service
 HTTP — plus un projet **Python** réel (`assembly` skipped, `coverage` rouge en nommant le
