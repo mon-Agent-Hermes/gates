@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { createServer, type Server } from "node:http";
 import { findChrome } from "./page-check.js";
 import {
-  BUDGETS_DEFAUT, evaluateSite, runSiteChecks, siteChecks, validateSite, type SiteObservation,
+  BUDGETS_DEFAUT, evaluateSite, runSiteChecks, siteChecks, siteNonObserve, validateSite,
+  type SiteObservation,
 } from "./site-check.js";
 
 const propre = (over: Partial<SiteObservation> = {}): SiteObservation => ({
@@ -153,4 +154,69 @@ describe.skipIf(!hasChrome)("contrôles de site dans un vrai navigateur", () => 
       server.close();
     }
   }, 90_000);
+});
+
+/**
+ * Quand on n'a PAS PU observer le site.
+ *
+ * Le défaut trouvé le 25/09/2026 : toute impossibilité d'observer rendait `warn` pour
+ * toutes les familles. Or deux causes très différentes passaient par là — une page que
+ * Chrome n'ouvre pas (défaut du SITE) et une dépendance du juge qui manque (défaut de
+ * son INSTALLATION, constaté en vrai : `Cannot find module 'axe-core/axe.min.js'`).
+ *
+ * Conséquence : un contrat qui déclare `bloquant: ["a11y"]` — donc approuvé à la main
+ * par un humain qui a voulu que ça bloque — était SILENCIEUSEMENT désactivé par une
+ * dépendance absente. C'est la forme exacte du faux vert que cet outil existe pour
+ * interdire : un contrôle qui a l'air configuré et qui ne peut plus rien rougir.
+ *
+ * La règle, uniforme et alignée sur le reste de l'outil (`requiredCommands`, `uncovered`) :
+ * « je n'ai pas pu vérifier » ne vaut jamais « vérifié » pour ce que le contrat a rendu
+ * bloquant. Ailleurs, on ne bloque pas — rien n'allait bloquer de toute façon.
+ */
+describe("site non observé — « je n'ai pas pu vérifier » ne vaut pas « vérifié »", () => {
+  const par = (checks: ReturnType<typeof siteNonObserve>) =>
+    Object.fromEntries(checks.map((c) => [c.name, c]));
+
+  it("rien de bloquant au contrat → signalé, jamais un rouge", () => {
+    // Le cas courant : les contrôles de site sont en observation. Une impossibilité
+    // d'observer ne doit pas rougir un projet dont personne n'a demandé qu'il rougisse.
+    const c = par(siteNonObserve(["a11y", "seo"], {}, "Chrome a fermé la page"));
+    expect(c.a11y.status).toBe("warn");
+    expect(c.seo.status).toBe("warn");
+    // La raison reste lisible : sans elle, personne ne sait quoi réparer.
+    expect(c.a11y.output).toContain("Chrome a fermé la page");
+  });
+
+  it("une FAMILLE bloquante au contrat → rouge, et la sortie dit qu'on n'a pas pu vérifier", () => {
+    const c = par(siteNonObserve(["a11y", "seo"], { bloquant: ["a11y"] }, "axe-core introuvable"));
+    expect(c.a11y.status).toBe("failed");
+    expect(c.a11y.output).toContain("axe-core introuvable");
+    // Les autres familles ne sont pas contaminées : seul ce que l'humain a rendu
+    // bloquant mérite un rouge.
+    expect(c.seo.status).toBe("warn");
+  });
+
+  it("une RÈGLE bloquante suffit à rougir sa famille", () => {
+    // `bloquant: ["seo:title"]` dit qu'un titre absent doit bloquer. Ne pas avoir pu
+    // regarder le titre n'est pas « le titre est là ».
+    const c = par(siteNonObserve(["a11y", "seo"], { bloquant: ["seo:title"] }, "page illisible"));
+    expect(c.seo.status).toBe("failed");
+    expect(c.a11y.status).toBe("warn");
+  });
+
+  it("outil absent et rien de bloquant → skipped, avec la cause", () => {
+    // Comportement conservé : sans Chrome, on se tait plutôt que de rendre un faux rouge.
+    const c = par(siteNonObserve(["a11y"], {}, "aucun Chrome/Edge trouvé", true));
+    expect(c.a11y.status).toBe("skipped");
+    expect(c.a11y.reason).toBe("tool-missing");
+  });
+
+  it("outil absent MAIS une règle bloquante → rouge quand même", () => {
+    // Le point qui fait la différence : un contrôle que l'humain a rendu bloquant ne
+    // peut pas être éteint par l'absence d'un outil sur la machine du juge. Sinon il
+    // suffirait que Chrome disparaisse pour que l'accessibilité cesse d'exister.
+    const c = par(siteNonObserve(["a11y"], { bloquant: ["a11y:image-alt"] }, "aucun Chrome/Edge trouvé", true));
+    expect(c.a11y.status).toBe("failed");
+    expect(c.a11y.output).toContain("Chrome");
+  });
 });

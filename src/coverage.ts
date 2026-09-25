@@ -454,6 +454,20 @@ export async function checkCoverage(input: CoverageVerdictInput): Promise<CheckR
     return { name: "coverage", status: "skipped", reason: "not-configured", output: "aucun requireExecuted déclaré" };
   }
   if (data.sources === 0) {
+    // Quand on SAIT déjà pourquoi rien n'a été mesuré — un site jugé à distance, un
+    // serveur tué de force —, le dire. Le conseil « vérifie que tes probes lancent bien
+    // le code instrumenté » enverrait sinon l'agent corriger des probes qui n'ont rien :
+    // un message faux coûte plus cher qu'un message absent, il fait boucler.
+    if (input.incomplete?.length) {
+      return {
+        name: "coverage",
+        status: "skipped",
+        reason: "not-configured",
+        output:
+          `mesure INCOMPLÈTE, verdict suspendu (pas de faux rouge) : ${input.incomplete.join(" ; ")}. ` +
+          `Aucune donnée de couverture n'a été produite ici — les probes ne sont pas en cause.`,
+      };
+    }
     return {
       name: "coverage",
       status: "skipped",

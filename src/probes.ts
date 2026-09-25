@@ -279,9 +279,15 @@ async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: Co
     const res = await execa(expand(p.run, tmp, cov), {
       cwd: dir, // la probe s'exécute DANS le projet, pas dans le dossier d'où `gates` est lancé
       shell: true, reject: false, all: true, timeout: timeoutMs,
+      // `FORCE_COLOR: "0"` comme pour l'app partagée (`startApp`) : sans lui, un
+      // `console.log("x", 42)` de Node rend « x \e[33m42\e[39m », et un `expect.stdout`
+      // compare du texte truffé de codes ANSI. Le résultat dépend alors de la machine —
+      // vert ici, rouge en CI — donc d'un échec qu'on ne peut pas reproduire, et sur
+      // lequel l'agent boucle à l'aveugle.
+      //
       // Instrumentation du runtime déclaré (§2.6) : le process écrit sa couverture
       // dans `$COV` à sa sortie — d'où l'exigence d'une sortie PROPRE.
-      env: cov?.env,
+      env: { FORCE_COLOR: "0", ...cov?.env },
     });
     if (exp.exitCode !== undefined && res.exitCode !== exp.exitCode) {
       reasons.push(`code de sortie ${res.exitCode} (attendu ${exp.exitCode})`);
@@ -316,7 +322,7 @@ async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, dir: string
     if (p.run) await execa(expand(p.run, tmp, cov), {
       cwd: dir,
       shell: true, reject: false, all: true, timeout: timeoutMs,
-      env: cov?.env,
+      env: { FORCE_COLOR: "0", ...cov?.env },
     });
     const fp = expand(p.file, tmp, cov);
     let size = -1;

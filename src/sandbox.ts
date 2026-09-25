@@ -186,7 +186,13 @@ async function probePaths(baseUrl: string, paths: string[]): Promise<{ path: str
   return out;
 }
 
-async function waitForUrl(url: string, timeoutMs: number): Promise<{ up: boolean; status?: number }> {
+/**
+ * Attend qu'une URL réponde. Exporté depuis le 25/09/2026 : en mode `--base-url`, le
+ * harnais ne démarre rien, mais il doit quand même distinguer « le site déployé est
+ * rouge » de « la prévisualisation n'était pas encore en ligne ». Sans cette attente,
+ * une PR jugée trop tôt rougirait sur un déploiement qui n'a pas fini de se construire.
+ */
+export async function waitForUrl(url: string, timeoutMs: number): Promise<{ up: boolean; status?: number }> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -300,11 +306,15 @@ async function stopTree(child: ResultPromise, graceMs: number): Promise<{ gracef
  */
 export async function smokeAssertions(
   baseUrl: string,
-  opts: { paths?: string[]; page?: PageRequirements; cmd?: string; startLogs?: string } = {},
+  opts: { paths?: string[]; page?: PageRequirements; cmd?: string; startLogs?: string; deploye?: boolean } = {},
 ): Promise<CheckResult> {
-  const started = `démarré : ${baseUrl} a répondu`;
+  // Le rapport du matin doit dire CE QUI a été jugé : une app relancée par la CI, ou le
+  // déploiement que le client ouvrira. Les deux passent par le même code ; ils ne doivent
+  // pas se lire pareil.
+  const started = opts.deploye ? `déployé : ${baseUrl} a répondu` : `démarré : ${baseUrl} a répondu`;
   const logs = opts.startLogs ?? "";
   const cmdNote = opts.cmd ? `\nCommande : ${opts.cmd}` : "";
+  const sujet = opts.deploye ? "le site déployé répond" : "l'appli démarre";
 
   // Front : « répond 200 » ne veut rien dire tant qu'on n'a pas regardé la page.
   if (opts.page) {
@@ -313,7 +323,7 @@ export async function smokeAssertions(
       return {
         name: "smoke",
         status: "failed",
-        output: `l'appli démarre mais la PAGE ne rend pas correctement.\n${pc.output}${cmdNote}\n--- logs ---\n${logs.slice(-2000)}`,
+        output: `${sujet} mais la PAGE ne rend pas correctement.\n${pc.output}${cmdNote}${logs ? `\n--- logs ---\n${logs.slice(-2000)}` : ""}`,
       };
     }
     const note = pc.status === "skipped" ? `contrôle de page ignoré (${pc.output})` : pc.output;
@@ -332,7 +342,7 @@ export async function smokeAssertions(
       name: "smoke",
       status: "failed",
       output:
-        `l'appli démarre mais ne sert PAS les routes déclarées : ${missing.map((p) => p.path).join(", ")}.\n` +
+        `${sujet} mais ne sert PAS les routes déclarées : ${missing.map((p) => p.path).join(", ")}.\n` +
         `Un 404 ici = route jamais montée sur l'application réellement lancée (racine de composition) — ` +
         `monte-la à l'endroit que la commande de démarrage lance, ne crée pas d'application parallèle.\n` +
         `Sondes : ${detail}${cmdNote}`,

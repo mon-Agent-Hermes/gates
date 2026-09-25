@@ -443,3 +443,82 @@ describe("sortie sous GitHub Actions", () => {
     }
   });
 });
+
+/**
+ * La phase rouge, de bout en bout — LE scénario qui justifie tout ce fichier.
+ *
+ * Le projet ci-dessous est TOUT VERT au sens du juge ordinaire : 2 critères sur 2
+ * vérifiés. Et l'un des deux est un mensonge — sa probe passerait sur un dépôt vide.
+ * C'est exactement le faux vert que `VALIDATION.md` a mesuré, remonté d'un cran : ce
+ * n'est plus le modèle qui se déclare fini, c'est la probe qui se déclare probante.
+ */
+describe("phase rouge — la probe qui ne constate rien", () => {
+  const base: Files = {
+    "spec.md": "# Spec\n\n- **AC-1** — la commande double son entrée.\n- **AC-2** — le projet est livrable.\n",
+    "src/calcul.mjs": "export const doubler = (n) => n * 2;\n",
+    "src/main.mjs": 'import { doubler } from "./calcul.mjs";\nconsole.log("resultat", doubler(21));\n',
+    "gates.json": JSON.stringify({
+      roots: ["src"],
+      probes: [
+        { id: "double-bien", criterion: "AC-1", kind: "cli", run: "node src/main.mjs", expect: { exitCode: 0, stdout: "resultat 42" } },
+        // Ne touche jamais au projet : elle rend AC-2 vert en n'observant rien.
+        { id: "probe-creuse", criterion: "AC-2", kind: "cli", run: "node -e \"console.log('ok')\"", expect: { exitCode: 0, stdout: "ok" } },
+      ],
+    }),
+  };
+
+  it("le run ordinaire est TOUT VERT — c'est le problème, pas le résultat", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(r.ok, JSON.stringify(r.report.criteria)).toBe(true);
+      expect(r.report.criteria?.["AC-2"].status).toBe("passed");
+    } finally {
+      await clean();
+    }
+  });
+
+  it("la phase rouge dénonce la probe creuse, et NOMME son critère", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir, { phaseRouge: true });
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(r.ok).toBe(false);
+      const c = byName(r, "phase-rouge");
+      expect(c.status).toBe("failed");
+      expect(c.output).toContain("probe-creuse");
+      expect(c.output).toContain("AC-2");
+      // La probe honnête ne doit pas être mise en cause : une phase rouge qui accuse
+      // tout le monde n'apprend rien et se fait désactiver.
+      expect(c.output).not.toContain("double-bien");
+    } finally {
+      await clean();
+    }
+  });
+
+  it("le projet d'origine sort INTACT d'une phase rouge", async () => {
+    // L'invariant qui prime sur le verdict : le juge travaille sur une copie. S'il
+    // abîmait le dépôt, il coûterait du travail réel — le seul défaut de cet outil qui
+    // ne se rattrape pas par une relecture.
+    const { dir, clean } = await projet(base);
+    try {
+      await check(dir, { phaseRouge: true });
+      const { readFile } = await import("node:fs/promises");
+      expect(await readFile(join(dir, "src/calcul.mjs"), "utf8")).toBe(base["src/calcul.mjs"]);
+      expect(await readFile(join(dir, "src/main.mjs"), "utf8")).toBe(base["src/main.mjs"]);
+    } finally {
+      await clean();
+    }
+  });
+
+  it("--phase-rouge et --base-url s'excluent (config invalide)", async () => {
+    const { dir, clean } = await projet(base);
+    try {
+      const r = await check(dir, { phaseRouge: true, baseUrl: "https://apercu.example/" });
+      expect(r && "configError" in r).toBe(true);
+    } finally {
+      await clean();
+    }
+  });
+});

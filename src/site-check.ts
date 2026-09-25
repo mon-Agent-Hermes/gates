@@ -175,6 +175,48 @@ export function evaluateSite(observations: SiteObservation[], cfg: SiteConfig = 
   return out;
 }
 
+/** Le contrat a-t-il rendu bloquant quoi que ce soit de cette famille ? */
+export function familleBloquante(cfg: SiteConfig, famille: Famille): boolean {
+  return (cfg.bloquant ?? []).some((r) => r === famille || r.startsWith(`${famille}:`));
+}
+
+/**
+ * Le verdict d'une famille qu'on N'A PAS PU observer — quelle qu'en soit la cause.
+ *
+ * Défaut corrigé le 25/09/2026 : toute impossibilité d'observer rendait `warn` ou
+ * `skipped`, y compris quand le contrat déclarait la famille **bloquante**. Une
+ * dépendance du juge absente (`Cannot find module 'axe-core/axe.min.js'`, constaté en
+ * vrai) désactivait donc en silence un contrôle qu'un humain avait explicitement voulu
+ * bloquant — la forme exacte du faux vert que cet outil existe pour interdire.
+ *
+ * La règle est celle du reste de l'outil (`requiredCommands`, `uncovered`) : « je n'ai
+ * pas pu vérifier » ne vaut jamais « vérifié » pour ce que le contrat fait bloquer.
+ * Ailleurs on ne bloque pas — rien n'allait bloquer de toute façon, et un faux rouge
+ * ferait boucler l'agent sur un défaut qui n'est pas dans son code.
+ */
+export function siteNonObserve(
+  familles: readonly Famille[],
+  cfg: SiteConfig,
+  raison: string,
+  outilAbsent = false,
+): CheckResult[] {
+  return familles.map((famille) => {
+    if (familleBloquante(cfg, famille)) {
+      return {
+        name: famille,
+        status: "failed",
+        output:
+          `${raison} — or le contrat rend « ${famille} » bloquante. « Je n'ai pas pu vérifier » ne vaut ` +
+          `pas « vérifié » : répare l'observation (dépendance du juge, navigateur, page qui ne rend pas), ` +
+          `ou retire la règle du contrat par un !approuve.`,
+      } satisfies CheckResult;
+    }
+    return outilAbsent
+      ? { name: famille, status: "skipped", reason: "tool-missing", output: raison } satisfies CheckResult
+      : { name: famille, status: "warn", output: raison } satisfies CheckResult;
+  });
+}
+
 /** Un check par famille : rouge s'il y a un constat bloquant, signalé s'il y en a d'autres. */
 export function siteChecks(
   observations: SiteObservation[],
@@ -188,10 +230,13 @@ export function siteChecks(
     if (famille === "a11y") {
       const echecs = observations.filter((o) => o.a11y === null);
       if (echecs.length === observations.length && observations.length) {
-        return {
-          name: famille, status: "skipped", reason: "tool-missing",
-          output: `audit d'accessibilité impossible : ${echecs.map((o) => `${o.page} (${o.a11yErreur ?? "?"})`).join(" ; ")}`,
-        } satisfies CheckResult;
+        // Même règle qu'au-dessus : axe muet sur TOUTES les pages n'est pas un audit
+        // réussi. Si le contrat rend l'accessibilité bloquante, c'est un rouge.
+        return siteNonObserve(
+          [famille], cfg,
+          `audit d'accessibilité impossible : ${echecs.map((o) => `${o.page} (${o.a11yErreur ?? "?"})`).join(" ; ")}`,
+          true,
+        )[0];
       }
     }
     if (!miens.length) return { name: famille, status: "passed", output: `rien à signaler (${pages})` } satisfies CheckResult;
@@ -336,16 +381,14 @@ export async function runSiteChecks(
   try {
     obs = await observeSite(baseUrl, cfg);
   } catch (e: any) {
-    // Une page que Chrome ne sait pas ouvrir alors que le smoke était vert : c'est un
-    // défaut du site, pas de l'outil — mais on ne bloque pas une règle en observation.
-    const msg = `contrôles de site impossibles : ${String(e?.message ?? e).slice(0, 300)}`;
-    return familles.map((f) => ({ name: f, status: "warn" as const, output: msg }));
+    // Deux causes opposées passent ici — une page que Chrome ne sait pas ouvrir (défaut
+    // du SITE) et une dépendance du juge absente (défaut de son INSTALLATION) — et on ne
+    // sait pas les distinguer d'ici. `siteNonObserve` tranche sur ce qui compte : ce que
+    // le contrat a rendu bloquant ne peut pas être éteint par une impossibilité d'observer.
+    return siteNonObserve(familles, cfg, `contrôles de site impossibles : ${String(e?.message ?? e).slice(0, 300)}`);
   }
   if (!obs) {
-    return familles.map((f) => ({
-      name: f, status: "skipped" as const, reason: "tool-missing" as const,
-      output: "aucun Chrome/Edge trouvé (définis HERMES_CHROME=<chemin>)",
-    }));
+    return siteNonObserve(familles, cfg, "aucun Chrome/Edge trouvé (définis HERMES_CHROME=<chemin>)", true);
   }
   return siteChecks(obs, cfg, familles);
 }

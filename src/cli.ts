@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions } from "./sandbox.js";
+import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions, waitForUrl } from "./sandbox.js";
 import { analyzeReachability } from "./reachability.js";
 import { runProbesAgainst, aggregateProbes, validateProbes, type Probe, type ProbeResult } from "./probes.js";
 import { parseAcceptanceCriteria } from "./spec.js";
@@ -20,6 +20,8 @@ import {
   renderAnnotations, renderText, type GatesReport,
 } from "./report.js";
 import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } from "./site-check.js";
+import { checkDocs, validateDocs, type DocsConfig } from "./docs.js";
+import { ciblesDe, preparerArbreNeutralise, verdictPhaseRouge } from "./phase-rouge.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).
@@ -52,6 +54,11 @@ export type GatesConfig = {
    */
   site?: SiteConfig;
   /**
+   * Documentation CONSTATÉE : le fichier existe, porte de la matière, et une probe
+   * exécute réellement le démarrage qu'il décrit. Absente, le check n'existe pas.
+   */
+  docs?: DocsConfig;
+  /**
    * Checks EN OBSERVATION : rouges, ils sont signalés (`warn`) sans bloquer. Pour un
    * contrôle neuf — un linter qu'on vient de poser. Jamais le juge fonctionnel.
    */
@@ -75,7 +82,12 @@ async function loadConfig(dir: string): Promise<GatesConfig | null> {
  * une faute de config — pas à l'évaluation, où elle n'est déjà plus rien.
  */
 function validateConfig(cfg: GatesConfig): string[] {
-  return [...validateProbes(cfg.probes), ...validateSite(cfg.site), ...validateObservation(cfg.observation)];
+  return [
+    ...validateProbes(cfg.probes),
+    ...validateSite(cfg.site),
+    ...validateDocs(cfg.docs, (cfg.probes ?? []).map((p) => p.id)),
+    ...validateObservation(cfg.observation),
+  ];
 }
 
 /**
@@ -94,12 +106,90 @@ function validateObservation(obs: unknown): string[] {
 }
 
 /**
+ * `--base-url` désigne un site DÉJÀ servi. Une valeur qui n'est pas une URL absolue
+ * `http(s)` est une config invalide (exit 2), pas un rouge : un `--base-url ""` avalé
+ * silencieusement ferait juger `localhost` à la place du déploiement, et rendrait vert un
+ * run qui n'a pas regardé ce qu'on lui demandait de regarder.
+ */
+function validateBaseUrl(url: string | null | undefined): string | null {
+  if (url === undefined || url === null) return null;
+  let u: URL;
+  try { u = new URL(url); } catch { return `--base-url : URL absolue attendue, reçu « ${url} »`; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return `--base-url : http(s) attendu, reçu « ${u.protocol} »`;
+  return null;
+}
+
+/**
+ * La phase rouge, SEULE : les probes rejouées sur un arbre dont les livrables sont vidés.
+ *
+ * Seule, et pas en plus du reste, parce qu'elle rejoue toutes les probes : la fondre dans
+ * le run normal doublerait le coût de chaque vérification. La CI la lance dans une seconde
+ * invocation, après un run vert — une probe déjà rouge n'apprend rien de plus en étant
+ * rouge une seconde fois.
+ */
+async function phaseRouge(dir: string, cfg: GatesConfig): Promise<{ ok: boolean; report: GatesReport }> {
+  const rendre = (c: CheckResult) => {
+    const report = buildReport([c]);
+    return { ok: report.ok, report };
+  };
+  const pasConcluant = (output: string) =>
+    rendre({ name: "phase-rouge", status: "skipped", reason: "not-configured", output });
+
+  const probes = cfg.probes ?? [];
+  if (!probes.length) return pasConcluant("aucune probe déclarée : il n'y a rien à éprouver.");
+
+  const cibles = ciblesDe({ deliverables: cfg.deliverables, roots: cfg.roots }, await listFiles(dir));
+  if (!cibles.length) {
+    return pasConcluant(
+      "aucun livrable identifié à vider (ni « deliverables », ni de fichier sous « roots ») — " +
+      "on ne peut pas prouver qu'une probe dépend d'un code qu'on n'a pas su nommer.",
+    );
+  }
+
+  const arbre = await preparerArbreNeutralise(dir, cibles);
+  if ("erreur" in arbre) return pasConcluant(`phase rouge impossible : ${arbre.erreur}.`);
+
+  try {
+    // ⚠️ `cfg.install` n'est PAS rejoué ici : `node_modules` est rattaché à l'original,
+    // et une installation écrirait donc dans les dépendances du projet réel — le juge
+    // abîmerait ce qu'il juge.
+    const appCfg = cfg.app?.start && cfg.app?.url
+      ? { start: cfg.app.start, url: cfg.app.url, readyTimeoutMs: cfg.app.readyTimeoutMs }
+      : null;
+    const serveur = probes.some((p) => p.kind === "http" || p.kind === "browser");
+
+    let resultats: ProbeResult[];
+    if (appCfg && serveur) {
+      // L'app peut très bien ne plus démarrer du tout : c'est un résultat, pas une panne.
+      // Les probes tournent alors sans URL et échouent — ce qui est exactement la preuve
+      // attendue.
+      const started = await startApp(arbre.dir, appCfg);
+      if ("error" in started) {
+        resultats = await runProbesAgainst(probes, { dir: arbre.dir });
+      } else {
+        try {
+          resultats = await runProbesAgainst(probes, { dir: arbre.dir, baseUrl: started.server.baseUrl });
+        } finally {
+          await started.server.stop();
+        }
+      }
+    } else {
+      resultats = await runProbesAgainst(probes, { dir: arbre.dir });
+    }
+
+    return rendre(verdictPhaseRouge({ probes: resultats, cibles }));
+  } finally {
+    await arbre.nettoyer();
+  }
+}
+
+/**
  * Lance les checks déclarés par `gates.json` dans `dir` et agrège le verdict.
  * exit 0 = tout vert · 1 = au moins un rouge · 2 = config invalide (géré par l'appelant).
  */
 export async function check(
   dir: string,
-  opts: { only?: string[] | null } = {},
+  opts: { only?: string[] | null; baseUrl?: string | null; phaseRouge?: boolean } = {},
 ): Promise<{ ok: boolean; report: GatesReport } | { configError: string } | null> {
   const cfg = await loadConfig(dir);
   if (!cfg) return null;
@@ -108,6 +198,16 @@ export async function check(
   // contrôle, sinon la clé silencieuse reviendrait par la porte de service.
   const configErrors = validateConfig(cfg);
   if (configErrors.length) return { configError: configErrors.join("\n  ") };
+
+  const urlError = validateBaseUrl(opts.baseUrl);
+  if (urlError) return { configError: urlError };
+
+  // Les deux modes se contredisent : un site déployé n'est pas un arbre qu'on neutralise.
+  // Les combiner rendrait un verdict dont personne ne saurait dire ce qu'il a mesuré.
+  if (opts.phaseRouge && opts.baseUrl) {
+    return { configError: "--phase-rouge et --base-url s'excluent : on ne neutralise pas un site déployé" };
+  }
+  if (opts.phaseRouge) return phaseRouge(dir, cfg);
 
   const want = (name: string) => !opts.only || opts.only.includes(name);
   const checks: CheckResult[] = [];
@@ -181,9 +281,16 @@ export async function check(
   //      d'un démarrage pour smoke + un autre pour les probes).
   let probeResults: ProbeResult[] = [];
   {
-    const appCfg = cfg.app?.start && cfg.app?.url
-      ? { start: cfg.app.start, url: cfg.app.url, readyTimeoutMs: cfg.app.readyTimeoutMs }
-      : null;
+    // `--base-url` : le site est DÉJÀ servi (une prévisualisation Vercel, par exemple).
+    // Rien à démarrer, et `app.start` n'est pas lu — on juge alors ce que le déploiement
+    // sert, pas ce que la CI saurait relancer. `app.paths` et `app.page` décrivent le
+    // site lui-même : ils s'appliquent aux deux modes sans changer de sens.
+    const deployed = opts.baseUrl ?? null;
+    const appCfg = deployed
+      ? { start: null, url: deployed, readyTimeoutMs: cfg.app?.readyTimeoutMs }
+      : cfg.app?.start && cfg.app?.url
+        ? { start: cfg.app.start, url: cfg.app.url, readyTimeoutMs: cfg.app.readyTimeoutMs }
+        : null;
     const wantSmoke = want("smoke") && !!appCfg;
     const wantProbes = want("probes") && !!cfg.probes?.length;
     const hasServerProbes = (cfg.probes ?? []).some((p) => p.kind === "http" || p.kind === "browser");
@@ -191,37 +298,64 @@ export async function check(
     // projet Python ne les voient jamais.
     const siteDeclared = !!appCfg && (cfg.site !== undefined || cfg.app?.page !== undefined);
     const siteFamilies: Famille[] = siteDeclared ? FAMILLES.filter((f) => want(f)) : [];
-    const needStart = !!appCfg && (wantSmoke || siteFamilies.length > 0 || (wantProbes && hasServerProbes));
+    const besoinApp = !!appCfg && (wantSmoke || siteFamilies.length > 0 || (wantProbes && hasServerProbes));
     const runProbesHere = async (baseUrl?: string) => {
       probeResults = await runProbesAgainst(cfg.probes!, { dir, baseUrl, coverage: cov ?? undefined });
       checks.push(aggregateProbes(probeResults));
     };
 
-    if (needStart && appCfg) {
+    /**
+     * Le corps commun aux deux modes : une app répond sur `baseUrl`, on la sonde.
+     * Le smoke passe d'abord — un audit d'accessibilité vert sur une page noire est un
+     * faux vert, et l'ordre n'est pas négociable, que l'app soit locale ou déployée.
+     */
+    const sonder = async (baseUrl: string, cmd: string | null, startLogs: string) => {
+      const smoke = wantSmoke || siteFamilies.length
+        ? await smokeAssertions(baseUrl, { paths: cfg.app?.paths, page: cfg.app?.page, cmd: cmd ?? undefined, startLogs, deploye: !cmd })
+        : null;
+      if (wantSmoke && smoke) checks.push(smoke);
+      if (siteFamilies.length) {
+        if (smoke?.status === "passed") checks.push(...await runSiteChecks(baseUrl, cfg.site ?? {}, siteFamilies));
+        else for (const f of siteFamilies) checks.push(siteSkipped(f, "le smoke n'est pas vert"));
+      }
+      if (wantProbes) await runProbesHere(baseUrl);
+    };
+
+    if (deployed && besoinApp) {
+      // Distinguer « le site déployé est rouge » de « la prévisualisation n'était pas
+      // encore en ligne » : sans cette attente, une PR jugée trop tôt rougirait sur un
+      // déploiement qui n'avait pas fini de se construire.
+      const ready = appCfg!.readyTimeoutMs ?? 60_000;
+      const up = await waitForUrl(deployed, ready);
+      if (!up.up) {
+        const pourquoi = `pas de réponse de ${deployed} en ${ready / 1000}s — le déploiement jugé n'est pas en ligne`;
+        if (wantSmoke) checks.push({ name: "smoke", status: "failed", output: pourquoi });
+        for (const f of siteFamilies) checks.push(siteSkipped(f, "le site déployé n'a pas répondu"));
+        if (wantProbes) await runProbesHere();
+      } else {
+        await sonder(deployed, null, "");
+        // Un déploiement distant n'est pas instrumenté : la couverture ne peut rien en
+        // savoir. On le DIT (verdict suspendu) plutôt que de déclarer mort du code qu'on
+        // n'a pas su observer — même règle qu'un serveur tué de force.
+        if (cov) {
+          cov.incomplete.push(
+            `le site jugé est déployé (${deployed}) : son exécution est hors de portée de la mesure — ` +
+            `la couverture serveur se lit sur le run local, pas sur celui-ci`,
+          );
+        }
+      }
+    } else if (besoinApp && appCfg?.start) {
       // L'app partagée est démarrée AVEC l'instrumentation : sans elle, tout projet
       // dont le code ne vit que dans un serveur serait invisible à la couverture.
       const covBefore = cov ? await countCoverageFiles(cov.dir) : 0;
-      const started = await startApp(dir, { ...appCfg, env: cov?.env });
+      const started = await startApp(dir, { start: appCfg.start, url: appCfg.url, readyTimeoutMs: appCfg.readyTimeoutMs, env: cov?.env });
       if ("error" in started) {
         if (wantSmoke) checks.push({ name: "smoke", status: "failed", output: `l'appli n'a pas démarré.\nCommande : ${appCfg.start}\n${started.error}` });
         for (const f of siteFamilies) checks.push(siteSkipped(f, "l'appli n'a pas démarré"));
         if (wantProbes) await runProbesHere();
       } else {
         try {
-          // Le smoke tourne aussi quand seuls les contrôles de site sont demandés : ils
-          // n'ont de sens que sur une page qui rend. Un audit vert sur un écran noir est
-          // un faux vert — l'ordre n'est pas négociable.
-          const smoke = wantSmoke || siteFamilies.length
-            ? await smokeAssertions(started.server.baseUrl, {
-              paths: cfg.app!.paths, page: cfg.app!.page, cmd: appCfg.start, startLogs: started.server.logs(),
-            })
-            : null;
-          if (wantSmoke && smoke) checks.push(smoke);
-          if (siteFamilies.length) {
-            if (smoke?.status === "passed") checks.push(...await runSiteChecks(started.server.baseUrl, cfg.site ?? {}, siteFamilies));
-            else for (const f of siteFamilies) checks.push(siteSkipped(f, "le smoke n'est pas vert"));
-          }
-          if (wantProbes) await runProbesHere(started.server.baseUrl);
+          await sonder(started.server.baseUrl, appCfg.start, started.server.logs());
         } finally {
           const stopped = await started.server.stop();
           await noteServerCoverage(cov, "l'app partagée", covBefore, stopped);
@@ -264,6 +398,12 @@ export async function check(
     }
   }
 
+  // 7bis. Documentation constatée. APRÈS les probes : c'est leur résultat qui dit si la
+  //       doc a été prouvée, et non le contraire.
+  if (want("docs") && cfg.docs) {
+    checks.push(await checkDocs({ cfg: cfg.docs, projectDir: dir, probes: probeResults }));
+  }
+
   // 8. Verdict PAR CRITÈRE (§2.3) : ce que la boucle rapporte dans Discord.
   //    N'a de sens que si les probes ont réellement tourné — sinon un `--only assembly`
   //    ferait passer tous les critères pour « non vérifiés » alors qu'on ne les a pas
@@ -282,11 +422,18 @@ function siteSkipped(name: Famille, why: string): CheckResult {
   };
 }
 
-function parseArgs(argv: string[]): { json: boolean; only: string[] | null } {
+export function parseArgs(argv: string[]): {
+  json: boolean; only: string[] | null; baseUrl: string | null; phaseRouge: boolean;
+} {
   const json = argv.includes("--json");
+  const phaseRouge = argv.includes("--phase-rouge");
   const i = argv.indexOf("--only");
   const only = i >= 0 && argv[i + 1] ? argv[i + 1].split(",").map((s) => s.trim()).filter(Boolean) : null;
-  return { json, only };
+  // `--base-url` PRÉSENT mais vide reste présent : c'est `validateBaseUrl` qui le refuse,
+  // pas un `?? null` silencieux qui ferait juger l'app locale sans rien dire.
+  const j = argv.indexOf("--base-url");
+  const baseUrl = j >= 0 ? (argv[j + 1] ?? "") : null;
+  return { json, only, baseUrl, phaseRouge };
 }
 
 /**
@@ -317,14 +464,14 @@ export function sortieGitHub(
 
 export async function main(argv: string[]): Promise<number> {
   if (argv[0] !== "check") {
-    process.stderr.write("usage : gates check [--json] [--only nom1,nom2]\n");
+    process.stderr.write("usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge]\n");
     return 2;
   }
-  const { json, only } = parseArgs(argv.slice(1));
+  const { json, only, baseUrl, phaseRouge } = parseArgs(argv.slice(1));
   const gh = sortieGitHub(json);
   const erreurConfig = (msg: string) => [`::error title=${escapeProperty("gates config")}::${escapeData(msg)}`];
   gh.ouvrir();
-  const res = await check(process.cwd(), { only });
+  const res = await check(process.cwd(), { only, baseUrl, phaseRouge });
   if (!res) {
     process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
     gh.fermer(erreurConfig("aucun gates.json lisible (config invalide, exit 2)"));
