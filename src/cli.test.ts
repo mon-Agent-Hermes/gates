@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { check, sortieGitHub } from "./cli.js";
+import { annotationsDuVerdict, check, sortieGitHub } from "./cli.js";
+import { buildCriteria, buildReport } from "./report.js";
 
 /**
  * Validation de bout en bout sur PLUSIEURS TYPES DE PROJETS.
@@ -441,6 +442,22 @@ describe("sortie sous GitHub Actions", () => {
       gh.fermer(["x"]);
       expect(s).toEqual([]);
     }
+  });
+
+  it("seule la vérification principale annote : une `gates etat` par job, pas trois", () => {
+    const rapport = buildReport(
+      [{ name: "probes", status: "failed", output: "AC-2 : 404" }],
+      buildCriteria(["AC-1", "AC-2"], [
+        { id: "a", criterion: "AC-1", status: "passed" },
+        { id: "b", criterion: "AC-2", status: "failed", output: "GET / → 404" },
+      ]),
+    );
+    const principale = annotationsDuVerdict(rapport, { baseUrl: null, phaseRouge: false });
+    expect(principale.filter((l) => l.startsWith("::notice title=gates etat::"))).toHaveLength(1);
+    expect(principale.some((l) => l.startsWith("::error title=gates AC-2::"))).toBe(true);
+    // Phase rouge : AC-2 rouge y est ATTENDU — le remonter en échec tromperait le pont.
+    expect(annotationsDuVerdict(rapport, { baseUrl: null, phaseRouge: true })).toEqual([]);
+    expect(annotationsDuVerdict(rapport, { baseUrl: "https://apercu.example", phaseRouge: false })).toEqual([]);
   });
 });
 

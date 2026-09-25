@@ -485,8 +485,23 @@ export async function main(argv: string[]): Promise<number> {
     return 2;
   }
   process.stdout.write((json ? JSON.stringify(res.report, null, 2) : renderText(res.report)) + "\n");
-  gh.fermer(renderAnnotations(res.report));
+  gh.fermer(annotationsDuVerdict(res.report, { baseUrl, phaseRouge }));
   return res.ok ? 0 : 1;
+}
+
+/**
+ * Seule la vérification principale annote. Le workflow partagé lance le juge jusqu'à trois
+ * fois dans le même job (principale, `--phase-rouge`, `--base-url`) : le pont refuse de lire
+ * l'état s'il trouve plus d'une `gates etat`, et il lirait les critères rouges de la phase
+ * rouge — attendus, le code y étant retiré — comme de vrais échecs. Les passes secondaires
+ * rendent leur verdict par le code de sortie ; le workflow pose sa propre annotation
+ * (`gates phase-rouge`, `gates deploiement`).
+ */
+export function annotationsDuVerdict(
+  report: GatesReport,
+  mode: { baseUrl: string | null; phaseRouge: boolean },
+): string[] {
+  return mode.phaseRouge || mode.baseUrl !== null ? [] : renderAnnotations(report);
 }
 
 // Exécution directe uniquement (pas quand le module est importé par un test).
