@@ -183,6 +183,37 @@ export function etatCompact(report: GatesReport): {
 }
 
 /**
+ * Les échecs d'un verdict, tels que les annotations `error` les portent : un par critère
+ * non vérifié, puis par check rouge, titrés `gates <nom>`, tronqués, dix au plus.
+ */
+export function echecsDuVerdict(report: GatesReport): { titre: string; message: string }[] {
+  const errors: { titre: string; message: string }[] = [];
+  for (const [id, c] of Object.entries(report.criteria ?? {})) {
+    if (c.status !== "passed") errors.push({ titre: `gates ${id}`, message: `${CRIT_LABEL[c.status]}${c.note ? ` — ${c.note}` : ""}` });
+  }
+  for (const c of report.checks) {
+    if (c.status === "failed") errors.push({ titre: `gates ${c.name}`, message: c.output || "échec" });
+  }
+  return errors.slice(0, ANNOTATIONS_PAR_NIVEAU).map((e) => ({ titre: e.titre, message: tronquer(e.message, LONGUEUR_NOTE) }));
+}
+
+/**
+ * Le verdict en fichier (`gates-etat.json`), que le workflow partagé attache au run.
+ *
+ * 26/09/2026 — constaté sur le VPS : le jeton de l'agent reçoit un 403 sur les annotations.
+ * Les lire exige la permission `Checks`, qu'un jeton fine-grained ne peut pas porter. Un
+ * artefact de run, lui, se lit avec `Actions: read`, que ce jeton a déjà. Même contenu que
+ * les annotations — l'état compact et les échecs —, rien d'autre : pas de code, pas de
+ * sortie brute.
+ */
+export function fichierEtat(report: GatesReport | null, erreurConfig?: string): {
+  v: 1; etat: ReturnType<typeof etatCompact> | null; echecs: { titre: string; message: string }[];
+} {
+  if (!report) return { v: 1, etat: null, echecs: [{ titre: "gates config", message: tronquer(erreurConfig ?? "config invalide", LONGUEUR_NOTE) }] };
+  return { v: 1, etat: etatCompact(report), echecs: echecsDuVerdict(report) };
+}
+
+/**
  * Les annotations d'un verdict, une commande de workflow par ligne :
  *  - UNE `notice` titrée `gates etat`, portant `etatCompact` en JSON. C'est elle que le
  *    pont lit pour savoir, critère par critère, où en est un brief de nuit ;
@@ -193,16 +224,8 @@ export function etatCompact(report: GatesReport): {
  */
 export function renderAnnotations(report: GatesReport): string[] {
   const lines = [`::notice title=${escapeProperty("gates etat")}::${escapeData(JSON.stringify(etatCompact(report)))}`];
-
-  const errors: { title: string; msg: string }[] = [];
-  for (const [id, c] of Object.entries(report.criteria ?? {})) {
-    if (c.status !== "passed") errors.push({ title: `gates ${id}`, msg: `${CRIT_LABEL[c.status]}${c.note ? ` — ${c.note}` : ""}` });
-  }
-  for (const c of report.checks) {
-    if (c.status === "failed") errors.push({ title: `gates ${c.name}`, msg: c.output || "échec" });
-  }
-  for (const e of errors.slice(0, ANNOTATIONS_PAR_NIVEAU)) {
-    lines.push(`::error title=${escapeProperty(e.title)}::${escapeData(tronquer(e.msg, LONGUEUR_NOTE))}`);
+  for (const e of echecsDuVerdict(report)) {
+    lines.push(`::error title=${escapeProperty(e.titre)}::${escapeData(e.message)}`);
   }
 
   const warns = report.checks.filter((c) => c.status === "warn");
