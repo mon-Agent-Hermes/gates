@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ import type { PageRequirements } from "./page-check.js";
 import type { CheckResult } from "./types.js";
 import {
   applyObservation, buildCriteria, buildReport, escapeData, escapeProperty, NOT_OBSERVABLE,
-  renderAnnotations, renderText, type GatesReport,
+  fichierEtat, renderAnnotations, renderText, type GatesReport,
 } from "./report.js";
 import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } from "./site-check.js";
 import { checkDocs, validateDocs, type DocsConfig } from "./docs.js";
@@ -423,7 +423,7 @@ function siteSkipped(name: Famille, why: string): CheckResult {
 }
 
 export function parseArgs(argv: string[]): {
-  json: boolean; only: string[] | null; baseUrl: string | null; phaseRouge: boolean;
+  json: boolean; only: string[] | null; baseUrl: string | null; phaseRouge: boolean; etatFichier: string | null;
 } {
   const json = argv.includes("--json");
   const phaseRouge = argv.includes("--phase-rouge");
@@ -433,7 +433,9 @@ export function parseArgs(argv: string[]): {
   // pas un `?? null` silencieux qui ferait juger l'app locale sans rien dire.
   const j = argv.indexOf("--base-url");
   const baseUrl = j >= 0 ? (argv[j + 1] ?? "") : null;
-  return { json, only, baseUrl, phaseRouge };
+  const k = argv.indexOf("--etat-fichier");
+  const etatFichier = k >= 0 && argv[k + 1] ? argv[k + 1] : null;
+  return { json, only, baseUrl, phaseRouge, etatFichier };
 }
 
 /**
@@ -464,17 +466,24 @@ export function sortieGitHub(
 
 export async function main(argv: string[]): Promise<number> {
   if (argv[0] !== "check") {
-    process.stderr.write("usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge]\n");
+    process.stderr.write("usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n");
     return 2;
   }
-  const { json, only, baseUrl, phaseRouge } = parseArgs(argv.slice(1));
+  const { json, only, baseUrl, phaseRouge, etatFichier } = parseArgs(argv.slice(1));
   const gh = sortieGitHub(json);
   const erreurConfig = (msg: string) => [`::error title=${escapeProperty("gates config")}::${escapeData(msg)}`];
+  // Comme les annotations : seule la vérification principale écrit le verdict en fichier.
+  const ecrireEtat = async (report: GatesReport | null, erreur?: string) => {
+    if (etatFichier && !phaseRouge && baseUrl === null) {
+      await writeFile(etatFichier, JSON.stringify(fichierEtat(report, erreur)) + "\n");
+    }
+  };
   gh.ouvrir();
   const res = await check(process.cwd(), { only, baseUrl, phaseRouge });
   if (!res) {
     process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
     gh.fermer(erreurConfig("aucun gates.json lisible (config invalide, exit 2)"));
+    await ecrireEtat(null, "aucun gates.json lisible (config invalide, exit 2)");
     return 2;
   }
   if ("configError" in res) {
@@ -482,10 +491,12 @@ export async function main(argv: string[]): Promise<number> {
     // pas le code. Deux causes distinctes → deux codes de sortie distincts.
     process.stderr.write(`gates : gates.json invalide — ${res.configError}\n`);
     gh.fermer(erreurConfig(`gates.json invalide — ${res.configError}`));
+    await ecrireEtat(null, `gates.json invalide — ${res.configError}`);
     return 2;
   }
   process.stdout.write((json ? JSON.stringify(res.report, null, 2) : renderText(res.report)) + "\n");
   gh.fermer(annotationsDuVerdict(res.report, { baseUrl, phaseRouge }));
+  await ecrireEtat(res.report);
   return res.ok ? 0 : 1;
 }
 

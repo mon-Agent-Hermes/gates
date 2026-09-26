@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { annotationsDuVerdict, check, sortieGitHub } from "./cli.js";
-import { buildCriteria, buildReport } from "./report.js";
+import { annotationsDuVerdict, check, parseArgs, sortieGitHub } from "./cli.js";
+import { buildCriteria, buildReport, fichierEtat, renderAnnotations } from "./report.js";
 
 /**
  * Validation de bout en bout sur PLUSIEURS TYPES DE PROJETS.
@@ -458,6 +458,31 @@ describe("sortie sous GitHub Actions", () => {
     // Phase rouge : AC-2 rouge y est ATTENDU — le remonter en échec tromperait le pont.
     expect(annotationsDuVerdict(rapport, { baseUrl: null, phaseRouge: true })).toEqual([]);
     expect(annotationsDuVerdict(rapport, { baseUrl: "https://apercu.example", phaseRouge: false })).toEqual([]);
+  });
+
+  it("le verdict en fichier porte le même état et les mêmes échecs que les annotations", () => {
+    const rapport = buildReport(
+      [{ name: "probes", status: "failed", output: "AC-2 : 404" }],
+      buildCriteria(["AC-1", "AC-2"], [
+        { id: "a", criterion: "AC-1", status: "passed" },
+        { id: "b", criterion: "AC-2", status: "failed", output: "GET / → 404" },
+      ]),
+    );
+    const f = fichierEtat(rapport);
+    const annotations = renderAnnotations(rapport);
+    expect(f.v).toBe(1);
+    expect(`::notice title=gates etat::${JSON.stringify(f.etat)}`).toBe(annotations[0]);
+    expect(f.echecs.map((e) => e.titre)).toEqual(["gates AC-2", "gates probes"]);
+    expect(annotations.filter((l) => l.startsWith("::error"))).toHaveLength(f.echecs.length);
+    expect(fichierEtat(null, "gates.json invalide")).toEqual({
+      v: 1, etat: null, echecs: [{ titre: "gates config", message: "gates.json invalide" }],
+    });
+  });
+
+  it("--etat-fichier : chemin lu, absent ou sans valeur → pas de fichier", () => {
+    expect(parseArgs(["--etat-fichier", "/tmp/e.json"]).etatFichier).toBe("/tmp/e.json");
+    expect(parseArgs(["--etat-fichier"]).etatFichier).toBeNull();
+    expect(parseArgs([]).etatFichier).toBeNull();
   });
 });
 
