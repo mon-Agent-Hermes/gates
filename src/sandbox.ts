@@ -207,6 +207,22 @@ export async function waitForUrl(url: string, timeoutMs: number): Promise<{ up: 
   return { up: false };
 }
 
+/**
+ * L'app sert-elle une PAGE, ou des données ? Observé sur le `content-type` de la racine,
+ * jamais déduit du contrat : c'est ce qui permet de dire à un projet web qu'il n'a pas
+ * déclaré de section `site`, sans imposer un audit d'accessibilité à une API — qui
+ * déclare `app.url` exactement comme un site. `null` = pas de réponse exploitable ; on
+ * n'affirme alors rien, puisqu'on n'a rien vu.
+ */
+export async function sertUnePage(baseUrl: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(baseUrl, { method: "GET" });
+    return /\btext\/html\b/i.test(res.headers.get("content-type") ?? "");
+  } catch {
+    return null;
+  }
+}
+
 /** Port d'une URL `http://host:PORT/...` (null si absent/invalide). */
 function portFromUrl(url: string): number | null {
   const m = url.match(/:(\d{2,5})(?:\D|$)/);

@@ -1,0 +1,7 @@
+{
+  "app": {
+    "start": "node serveur.mjs",
+    "url": "http://127.0.0.1:39001/",
+    "readyTimeoutMs": 20000
+  }
+}
