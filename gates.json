@@ -77,6 +77,20 @@
       "kind": "cli",
       "run": "cd fixtures/alias-tsconfig && node ../../bin/gates.mjs check",
       "expect": { "exitCode": 0, "stdout": "/tous atteignables depuis src\\/main\\.ts/" }
+    },
+    {
+      "id": "plan-dit-ce-qui-ne-sera-pas-juge-et-les-regles",
+      "criterion": "AC-9",
+      "kind": "cli",
+      "run": "cd fixtures/site-sans-section && node ../../bin/gates.mjs plan",
+      "expect": { "exitCode": 0, "stdout": "/Ce qui ne sera PAS jugé[\\s\\S]*mobile[\\s\\S]*pas de section « site » au contrat[\\s\\S]*mobile:scroll-horizontal/" }
+    },
+    {
+      "id": "plan-refuse-un-contrat-invalide",
+      "criterion": "AC-9",
+      "kind": "cli",
+      "run": "cd fixtures/projet-config-invalide && node ../../bin/gates.mjs plan",
+      "expect": { "exitCode": 2, "stderr": "/clé inconnue « json »/" }
     }
   ],
   "coverage": {

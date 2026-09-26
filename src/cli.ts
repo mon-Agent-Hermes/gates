@@ -22,6 +22,7 @@ import {
 import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } from "./site-check.js";
 import { checkDocs, validateDocs, type DocsConfig } from "./docs.js";
 import { ciblesDe, preparerArbreNeutralise, verdictPhaseRouge } from "./phase-rouge.js";
+import { construirePlan, renderPlan } from "./plan.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).
@@ -492,8 +493,12 @@ export function sortieGitHub(
 }
 
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "plan") return await planifier(process.cwd());
   if (argv[0] !== "check") {
-    process.stderr.write("usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n");
+    process.stderr.write(
+      "usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n" +
+      "        gates plan   — ce que le contrat fera juger, et ce qu'il ne fera pas juger (rien n'est exécuté)\n",
+    );
     return 2;
   }
   const { json, only, baseUrl, phaseRouge, etatFichier } = parseArgs(argv.slice(1));
@@ -525,6 +530,37 @@ export async function main(argv: string[]): Promise<number> {
   gh.fermer(annotationsDuVerdict(res.report, { baseUrl, phaseRouge }));
   await ecrireEtat(res.report);
   return res.ok ? 0 : 1;
+}
+
+/**
+ * `gates plan` : le contrat est lu et VALIDÉ, rien n'est exécuté.
+ *
+ * La validation n'est pas un zèle. Planifier sur un contrat que `check` refuserait
+ * donnerait un plan rassurant pour une configuration qui ne tournera jamais — et c'est
+ * exactement le genre de vert qu'on passe sa vie à empêcher ici. Même refus, même code
+ * de sortie qu'un `check`.
+ */
+async function planifier(dir: string): Promise<number> {
+  const cfg = await loadConfig(dir);
+  if (!cfg) {
+    process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
+    return 2;
+  }
+  const erreurs = validateConfig(cfg);
+  if (erreurs.length) {
+    process.stderr.write(`gates : gates.json invalide — ${erreurs.join("\n  ")}\n`);
+    return 2;
+  }
+  const fichier = cfg.specFile ?? "spec.md";
+  let lisible = true;
+  let criteres: string[] = [];
+  try {
+    criteres = parseAcceptanceCriteria(await readFile(resolve(dir, fichier), "utf8")).map((c) => c.id);
+  } catch {
+    lisible = false;
+  }
+  process.stdout.write(renderPlan(construirePlan(cfg, { fichier, lisible, criteres })) + "\n");
+  return 0;
 }
 
 /**
