@@ -15,6 +15,7 @@ gates check --json       # sortie machine (pour la skill /verify d'Hermes)
 gates check --only assembly,smoke
 gates check --base-url https://apercu.vercel.app/   # juger un site DÉJÀ déployé
 gates check --phase-rouge  # les probes échouent-elles quand le code est vidé ?
+gates plan               # ce que le contrat fera juger, et ce qu'il ne fera PAS juger
 ```
 
 - **exit 0** = tout vert · **exit 1** = au moins un check rouge · **exit 2** = config invalide.
@@ -59,7 +60,7 @@ navigateur classé « API HTTP » parce que la spec contenait le mot *server*).
 | `requiredCommands` | — | un gate requis dont l'outil est **absent** = échec, pas « skipped » |
 | `deliverables` | `deliverables` | fichiers qui doivent exister (ferme le « coder-fantôme ») |
 | `roots` | `assembly` | dossiers de livrables à contrôler (défaut `src`) |
-| `entry` | `assembly` | point d'entrée déclaré ; déclaré mais introuvable = **échec**, pas de repli silencieux |
+| `entry` | `assembly` | point(s) d'entrée déclaré(s) — une chaîne, ou une **liste** ; déclaré mais introuvable = **échec**, pas de repli silencieux |
 | `coverage` | `coverage` | atteignabilité par exécution, tous runtimes (voir plus bas) |
 | `app.start`+`url` | `smoke` | l'app démarre et répond ; `paths` = routes qui ne doivent pas répondre 404 |
 | `app.page` | `smoke` | rendu réel dans Chrome headless (canvas, appels de dessin, erreurs console) |
@@ -69,6 +70,57 @@ navigateur classé « API HTTP » parce que la spec contenait le mot *server*).
 
 Le check `assembly` suit le graphe réel depuis le point d'entrée (`index.html`, sinon
 `src/main.*`) et échoue sur tout livrable jamais atteint — assets CSS compris.
+
+### Les frameworks à conventions (AC-7, AC-8)
+
+Deux angles morts, fermés le 26/09/2026. Tous deux produisaient un **faux rouge** : le pire
+des défauts pour ce gate, puisqu'il frappe le code juste, épargne le code fautif, et ne
+laisse à l'agent qu'une sortie — tordre le code, ou affaiblir le contrat.
+
+**Plusieurs points d'entrée.** Dans un App Router, `layout.tsx` et `page.tsx` ne s'importent
+pas : le framework les assemble par convention. Avec une entrée unique, le layout — fichier
+obligatoire — était déclaré injoignable. `entry` accepte donc une liste :
+
+```json
+{ "entry": ["src/app/layout.tsx", "src/app/page.tsx"], "roots": ["src"] }
+```
+
+La liste ne relâche pas la règle : une entrée introuvable reste une **erreur nommée**, et les
+entrées valides ne la rattrapent pas — sinon une faute de frappe disparaîtrait dans un vert.
+
+**Les alias de `tsconfig.json`.** `compilerOptions.paths` est lu, et `@/lib/x` résolu comme
+un chemin relatif — c'est l'alias que `create-next-app` génère par défaut. Sans ça, le seul
+contournement était d'interdire `@/` dans tous les projets : le juge dictait l'écriture du
+code au lieu de la vérifier. Lecture best-effort (commentaires et virgules finales tolérés) :
+un `tsconfig.json` illisible laisse l'assemblage exactement dans l'état d'avant, jamais en
+échec.
+
+⚠️ Un specifier **nu** (`playcanvas`, `react`) ne résout toujours rien, même si le projet
+contient un fichier du même nom : ce serait un faux **vert**, et c'est la seule erreur que
+ce gate n'a pas le droit de commettre.
+
+## `gates plan` — le juge répond lui-même à « sais-tu faire X ? » (AC-9)
+
+Tant que « ce que le juge sait faire » n'existe que dans ce README, un agent le **récite**.
+Et il le récite faux : le 26/09/2026, trois affirmations fausses en une soirée, dont deux
+servaient à proposer de **retirer** une exigence du contrat (« mobile d'abord n'est pas
+vérifiable », « la couverture resterait rouge quoi qu'il arrive »). Aucune ne coûtait rien à
+écrire, et seule une relecture humaine les a arrêtées.
+
+`gates plan` lit le contrat, **n'exécute rien**, et imprime trois choses :
+
+1. **ce qui sera jugé**, avec le détail (commande requise, entrées d'assemblage, familles
+   bloquantes ou seulement signalées) ;
+2. **ce qui ne sera PAS jugé, et pourquoi** — c'est la moitié utile : `– mobile   pas de
+   section « site » au contrat` ;
+3. **les règles que porte chaque famille**, pour que personne n'ait à s'en souvenir.
+
+Un contrat invalide sort en **2**, comme pour `check` : planifier sur une configuration que
+le juge refuserait donnerait un plan rassurant pour un run qui n'aura jamais lieu.
+
+⚠️ **« Jugé » veut dire *le contrat le demande*, jamais *ça passera*** — ni même que ça
+tournera : un contrôle prévu peut encore être ignoré à l'exécution (Chrome absent, smoke
+rouge). La sortie le rappelle en dernière ligne, pour qu'on ne la cite pas comme un verdict.
 
 ## `--base-url` — juger le site déployé, pas celui que la CI relance
 
@@ -115,7 +167,7 @@ Absent → gate `skipped` (jamais un faux rouge). En CI, on installe Chrome et o
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest (118 tests, dont un vrai navigateur si Chrome présent)
+npm test            # vitest (204 tests, dont un vrai navigateur si Chrome présent)
 ```
 
 ## Probes (§2.5)
@@ -370,6 +422,35 @@ contrat la liste — donc après un `!approuve` humain :
 doit pas rendre une règle bloquante inopérante. Chaque constat dit la règle, la page, les
 éléments fautifs et la correction attendue.
 
+### Quand rien n'est déclaré : le juge dit ce qu'il n'a pas regardé (AC-6)
+
+Une section `site` absente ne rendait, jusqu'au 26/09/2026, **aucune ligne** : pas un `–`,
+rien. Un projet web sortait donc vert sans que personne ait regardé l'accessibilité, le
+rendu à 375 px, le poids ni le référencement — et le rapport n'en disait pas un mot. C'est
+le silence que `gates` refuse déjà un cran plus bas, où une probe ignorée annonce *« le
+critère n'a PAS été vérifié »*.
+
+Désormais, quand l'app répond en `text/html` et que le contrat ne déclare ni `site` ni
+`app.page`, les quatre familles apparaissent en `skipped` et nomment la clé qui manque :
+
+```
+– a11y — skipped
+    non audité : pas de section « site » au contrat, alors que l'app sert une page HTML.
+    Ajoute "site": {} au gates.json — a11y sera signalé, pas bloquant.
+```
+
+Le déclencheur est le `content-type` **observé**, jamais la présence d'`app.url` : une API
+déclare `app.url` exactement comme un site, et un rappel qui tombe partout finit par n'être
+lu nulle part.
+
+⚠️ La même clé commande le job CI qui juge la **prévisualisation déployée**
+(`infra/workflow-partage/gates.yml`). Sans section `site`, le lien qu'un client ouvrira
+n'est donc jugé par personne — c'est l'autre moitié de ce que ces quatre lignes signalent.
+
+Le verdict, lui, ne bouge pas : `skipped` ne rougit rien. **Le juge constate, il ne décide
+pas d'auditer** — ça se déclare au contrat et ça passe par `!approuve` (règles 3 et 5 du
+chantier 9).
+
 ## Couverture navigateur (chantier 7)
 
 Les probes `browser` sont instrumentées depuis le 19/09/2026 (`page.coverage` de puppeteer) :
@@ -408,7 +489,7 @@ probes **`cli` / `artifact` / `http` / `browser` / `process`** · **spec-coverag
 **coverage** (node/python/go/custom) · contrôles de site (a11y, mobile, budgets, seo) ·
 **`docs`** · verdict par critère · harnais serveur (app partagée, un seul démarrage) ·
 **`--base-url`** (site déployé) · **`--phase-rouge`** (les probes dépendent-elles du
-code ?). **189 tests**, dont un vrai navigateur quand Chrome est présent.
+code ?). **204 tests**, dont un vrai navigateur quand Chrome est présent.
 
 Validé de bout en bout sur trois types de projets — CLI, générateur d'artefact, service
 HTTP — plus un projet **Python** réel (`assembly` skipped, `coverage` rouge en nommant le

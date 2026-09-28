@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions, waitForUrl } from "./sandbox.js";
+import { runGuardrailsInDir, runInstall, checkDeliverables, startApp, smokeAssertions, waitForUrl, sertUnePage } from "./sandbox.js";
 import { analyzeReachability } from "./reachability.js";
 import { runProbesAgainst, aggregateProbes, validateProbes, type Probe, type ProbeResult } from "./probes.js";
 import { parseAcceptanceCriteria } from "./spec.js";
@@ -22,6 +22,7 @@ import {
 import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } from "./site-check.js";
 import { checkDocs, validateDocs, type DocsConfig } from "./docs.js";
 import { ciblesDe, preparerArbreNeutralise, verdictPhaseRouge } from "./phase-rouge.js";
+import { construirePlan, renderPlan } from "./plan.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).
@@ -31,7 +32,8 @@ export type GatesConfig = {
   install?: string;
   commands?: Record<string, string>;
   requiredCommands?: string[];
-  entry?: string;
+  /** Point(s) d'entrée de l'assemblage. Une LISTE quand le framework en pose plusieurs. */
+  entry?: string | string[];
   roots?: string[];
   app?: {
     start?: string;
@@ -297,7 +299,8 @@ export async function check(
     // Contrôles de site : seulement si le projet déclare un site. Un CLI, une API, un
     // projet Python ne les voient jamais.
     const siteDeclared = !!appCfg && (cfg.site !== undefined || cfg.app?.page !== undefined);
-    const siteFamilies: Famille[] = siteDeclared ? FAMILLES.filter((f) => want(f)) : [];
+    const famillesVoulues: Famille[] = FAMILLES.filter((f) => want(f));
+    const siteFamilies: Famille[] = siteDeclared ? famillesVoulues : [];
     const besoinApp = !!appCfg && (wantSmoke || siteFamilies.length > 0 || (wantProbes && hasServerProbes));
     const runProbesHere = async (baseUrl?: string) => {
       probeResults = await runProbesAgainst(cfg.probes!, { dir, baseUrl, coverage: cov ?? undefined });
@@ -317,6 +320,15 @@ export async function check(
       if (siteFamilies.length) {
         if (smoke?.status === "passed") checks.push(...await runSiteChecks(baseUrl, cfg.site ?? {}, siteFamilies));
         else for (const f of siteFamilies) checks.push(siteSkipped(f, "le smoke n'est pas vert"));
+      }
+      // Rien de déclaré, mais l'app sert une PAGE : les quatre familles ne tourneront pas.
+      // Le taire rendrait un vert qui n'a regardé ni l'accessibilité, ni le rendu à 375 px,
+      // ni le poids, ni le référencement. `gates` refuse déjà ce silence un cran plus bas —
+      // une probe ignorée dit « le critère n'a PAS été vérifié » ; une famille entière
+      // jamais déclarée mérite la même phrase. On CONSTATE, on ne décide pas : auditer se
+      // déclare au contrat et passe par `!approuve` (chantier 9, règles 3 et 5).
+      if (!siteDeclared && famillesVoulues.length && smoke?.status !== "failed" && (await sertUnePage(baseUrl))) {
+        for (const f of famillesVoulues) checks.push(siteNonDeclare(f));
       }
       if (wantProbes) await runProbesHere(baseUrl);
     };
@@ -415,6 +427,22 @@ export async function check(
   return { ok: report.ok, report };
 }
 
+/**
+ * Une famille de contrôles que le contrat n'a jamais demandée, alors que l'app sert une
+ * page. `skipped` : le verdict ne bouge pas — mais l'omission apparaît dans le rapport et
+ * dans le JSON de l'annotation `gates etat`, donc sous les yeux au moment d'`!approuve` et
+ * dans le rapport du matin. C'est la différence entre « audité, rien à signaler » et
+ * « personne n'a regardé », que rien ne disait jusqu'ici.
+ */
+function siteNonDeclare(name: Famille): CheckResult {
+  return {
+    name, status: "skipped", reason: "not-configured",
+    output:
+      `non audité : pas de section « site » au contrat, alors que l'app sert une page HTML. ` +
+      `Ajoute "site": {} au gates.json — ${name} sera signalé, pas bloquant.`,
+  };
+}
+
 function siteSkipped(name: Famille, why: string): CheckResult {
   return {
     name, status: "skipped", reason: "not-configured",
@@ -465,8 +493,12 @@ export function sortieGitHub(
 }
 
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "plan") return await planifier(process.cwd());
   if (argv[0] !== "check") {
-    process.stderr.write("usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n");
+    process.stderr.write(
+      "usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n" +
+      "        gates plan   — ce que le contrat fera juger, et ce qu'il ne fera pas juger (rien n'est exécuté)\n",
+    );
     return 2;
   }
   const { json, only, baseUrl, phaseRouge, etatFichier } = parseArgs(argv.slice(1));
@@ -498,6 +530,37 @@ export async function main(argv: string[]): Promise<number> {
   gh.fermer(annotationsDuVerdict(res.report, { baseUrl, phaseRouge }));
   await ecrireEtat(res.report);
   return res.ok ? 0 : 1;
+}
+
+/**
+ * `gates plan` : le contrat est lu et VALIDÉ, rien n'est exécuté.
+ *
+ * La validation n'est pas un zèle. Planifier sur un contrat que `check` refuserait
+ * donnerait un plan rassurant pour une configuration qui ne tournera jamais — et c'est
+ * exactement le genre de vert qu'on passe sa vie à empêcher ici. Même refus, même code
+ * de sortie qu'un `check`.
+ */
+async function planifier(dir: string): Promise<number> {
+  const cfg = await loadConfig(dir);
+  if (!cfg) {
+    process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
+    return 2;
+  }
+  const erreurs = validateConfig(cfg);
+  if (erreurs.length) {
+    process.stderr.write(`gates : gates.json invalide — ${erreurs.join("\n  ")}\n`);
+    return 2;
+  }
+  const fichier = cfg.specFile ?? "spec.md";
+  let lisible = true;
+  let criteres: string[] = [];
+  try {
+    criteres = parseAcceptanceCriteria(await readFile(resolve(dir, fichier), "utf8")).map((c) => c.id);
+  } catch {
+    lisible = false;
+  }
+  process.stdout.write(renderPlan(construirePlan(cfg, { fichier, lisible, criteres })) + "\n");
+  return 0;
 }
 
 /**

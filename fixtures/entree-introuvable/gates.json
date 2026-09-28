@@ -1,0 +1,4 @@
+{
+  "entry": ["src/app/layout.tsx", "src/app/absente.tsx"],
+  "roots": ["src"]
+}

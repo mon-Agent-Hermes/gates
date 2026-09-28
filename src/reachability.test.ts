@@ -25,7 +25,12 @@ describe("extraction des références", () => {
     expect(refs).toEqual(["/src/main.ts", "./style.css"]);
   });
 
-  it("modules : imports statiques, dynamiques, CSS et require", () => {
+  // L'extracteur ne trie plus : il rend TOUS les specifiers, y compris `playcanvas`.
+  // Décider ce qui est « local » demande de lire `tsconfig.json`, que ce texte n'a pas —
+  // c'est donc `resolveRef` qui tranche. La garantie que protégeait l'ancienne version
+  // (un paquet ne devient jamais une cible) n'a pas disparu, elle est éprouvée plus bas
+  // par « un specifier nu ne résout pas contre un fichier du projet ».
+  it("modules : imports statiques, dynamiques, CSS et require — tous rendus, le tri vient après", () => {
     const refs = moduleReferences(
       `import { a } from './a';
        import './ui/styles.css';
@@ -33,7 +38,7 @@ describe("extraction des références", () => {
        const r = require('./legacy');
        import x from 'playcanvas';`,
     );
-    expect(refs).toEqual(["./a", "./ui/styles.css", "../lazy/mod", "./legacy"]);
+    expect(refs).toEqual(["./a", "./ui/styles.css", "../lazy/mod", "./legacy", "playcanvas"]);
   });
 
   it("CSS : @import local", () => {
@@ -55,6 +60,19 @@ describe("analyzeReachability", () => {
     expect(r.entries).toEqual(["index.html"]);
     expect(r.unreachable).toEqual([]);
     expect(r.scanned).toBe(4);
+  });
+
+  it("un specifier nu ne résout pas contre un fichier du projet qui porte le même nom", async () => {
+    // La garantie que l'ancien filtre de `moduleReferences` portait. Sans elle, importer
+    // `playcanvas` rendrait « atteignable » un `src/playcanvas.ts` mort du projet — un
+    // faux VERT, la seule erreur que ce gate n'a pas le droit de commettre.
+    const dir = project({
+      "index.html": `<script type="module" src="/src/main.ts"></script>`,
+      "src/main.ts": `import { Application } from 'playcanvas';\nnew Application();`,
+      "src/playcanvas.ts": `export const leurre = 1;`,
+    });
+    const r = await analyzeReachability(dir);
+    expect(r.unreachable).toEqual(["src/playcanvas.ts"]);
   });
 
   it("LE défaut du jeu voxel : le point d'entrée n'atteint qu'un fichier sur quatre", async () => {

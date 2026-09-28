@@ -88,8 +88,12 @@ export function moduleReferences(code: string): string[] {
   const re =
     /(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   for (const m of code.matchAll(re)) {
+    // Tous les specifiers sortent d'ici, y compris les non relatifs : c'est `resolveRef`
+    // qui décide, car un « @/lib/x » est un fichier DU PROJET dès que `tsconfig.json`
+    // le déclare, alors qu'un « react » n'en sera jamais un. Filtrer sur la forme ici
+    // revenait à trancher sans avoir lu le contrat du projet.
     const spec = m[1] ?? m[2] ?? m[3] ?? m[4];
-    if (spec && (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/"))) out.push(spec);
+    if (spec) out.push(spec);
   }
   return out;
 }
@@ -122,21 +126,99 @@ const TS_FROM_JS: Record<string, string[]> = {
   ".cjs": [".cts", ".cjs"],
 };
 
-/** Résout un specifier vers un fichier réel (essaie les extensions et /index). */
-function resolveRef(projectDir: string, fromFile: string, spec: string): string | null {
-  const base = spec.startsWith("/")
-    ? resolve(projectDir, spec.replace(/^\/+/, ""))
-    : resolve(dirname(fromFile), spec);
-  const candidates = [base];
+/** Chemins à essayer sur le disque pour une base donnée (extensions, `/index`). */
+function candidats(base: string): string[] {
+  const out = [base];
   const ext = extname(base).toLowerCase();
   if (!ext) {
-    for (const e of JS_RESOLVE_EXT) candidates.push(base + e);
-    for (const e of JS_RESOLVE_EXT) candidates.push(join(base, "index" + e));
+    for (const e of JS_RESOLVE_EXT) out.push(base + e);
+    for (const e of JS_RESOLVE_EXT) out.push(join(base, "index" + e));
   } else if (TS_FROM_JS[ext]) {
     const sansExt = base.slice(0, -ext.length);
-    for (const e of TS_FROM_JS[ext]!) candidates.push(sansExt + e);
+    for (const e of TS_FROM_JS[ext]!) out.push(sansExt + e);
   }
-  return candidates.find((c) => existsSync(c)) ?? null;
+  return out;
+}
+
+/** Un motif de `compilerOptions.paths`, découpé une fois pour toutes. */
+type Alias = { avant: string; apres: string; etoile: boolean; cibles: string[] };
+
+/**
+ * Retire d'un `tsconfig.json` ce que `JSON.parse` refuse mais que TypeScript tolère :
+ * commentaires et virgules finales. Best-effort — en cas d'échec on repart sans alias.
+ */
+function sansCommentaires(s: string): string {
+  return s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'\\])\/\/.*$/gm, "$1")
+    .replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
+ * Alias de chemin déclarés dans `tsconfig.json`.
+ *
+ * Sans eux, `@/lib/titre` — la convention que `create-next-app` génère par défaut — rendait
+ * injoignable du code parfaitement câblé. Le seul contournement était d'interdire l'alias
+ * dans tous les projets : le juge dictait l'écriture du code au lieu de la vérifier.
+ *
+ * Lecture best-effort : un `tsconfig.json` absent, illisible ou exotique ne doit jamais
+ * faire échouer l'assemblage — on se retrouve sans alias, exactement comme avant.
+ */
+export async function lireAlias(projectDir: string): Promise<Alias[]> {
+  let brut: string;
+  try { brut = await readFile(join(projectDir, "tsconfig.json"), "utf8"); } catch { return []; }
+  let cfg: { compilerOptions?: { baseUrl?: unknown; paths?: unknown } };
+  try { cfg = JSON.parse(sansCommentaires(brut)); } catch { return []; }
+  const co = cfg?.compilerOptions;
+  if (!co?.paths || typeof co.paths !== "object") return [];
+  const racine = resolve(projectDir, typeof co.baseUrl === "string" ? co.baseUrl : ".");
+  const out: Alias[] = [];
+  for (const [motif, cibles] of Object.entries(co.paths as Record<string, unknown>)) {
+    if (!Array.isArray(cibles)) continue;
+    const i = motif.indexOf("*");
+    out.push({
+      avant: i === -1 ? motif : motif.slice(0, i),
+      apres: i === -1 ? "" : motif.slice(i + 1),
+      etoile: i !== -1,
+      cibles: cibles.filter((c): c is string => typeof c === "string").map((c) => resolve(racine, c)),
+    });
+  }
+  return out;
+}
+
+/** Bases candidates d'un specifier passé par les alias (le `*` capturé est réinjecté). */
+function basesAlias(spec: string, alias: Alias[]): string[] {
+  const out: string[] = [];
+  for (const a of alias) {
+    if (!a.etoile) {
+      if (spec === a.avant) out.push(...a.cibles);
+      continue;
+    }
+    if (!spec.startsWith(a.avant) || !spec.endsWith(a.apres)) continue;
+    if (spec.length < a.avant.length + a.apres.length) continue;
+    const capture = spec.slice(a.avant.length, spec.length - a.apres.length);
+    // `resolve` renormalise les séparateurs : sans ça, un chemin mi-slash mi-antislash
+    // ne serait pas reconnu comme le livrable déjà parcouru, sous Windows.
+    for (const c of a.cibles) out.push(resolve(c.replace("*", capture)));
+  }
+  return out;
+}
+
+/** Résout un specifier vers un fichier réel (essaie les extensions et /index). */
+function resolveRef(projectDir: string, fromFile: string, spec: string, alias: Alias[] = []): string | null {
+  if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/")) {
+    const base = spec.startsWith("/")
+      ? resolve(projectDir, spec.replace(/^\/+/, ""))
+      : resolve(dirname(fromFile), spec);
+    return candidats(base).find((c) => existsSync(c)) ?? null;
+  }
+  // Ni relatif ni absolu : ce n'est un fichier du projet que si le contrat du projet le
+  // dit. « react » ne résoudra jamais ; « @/lib/titre » résoudra si `paths` le déclare.
+  for (const base of basesAlias(spec, alias)) {
+    const trouve = candidats(base).find((c) => existsSync(c));
+    if (trouve) return trouve;
+  }
+  return null;
 }
 
 /**
@@ -146,10 +228,20 @@ function resolveRef(projectDir: string, fromFile: string, spec: string): string 
  * invitation à deviner : c'est exactement la façon dont une exigence se décroche en
  * silence de sa vérification.
  */
-async function findEntries(projectDir: string, declared?: string): Promise<string[] | { error: string }> {
-  if (declared) {
-    const p = resolve(projectDir, declared);
-    return existsSync(p) ? [p] : { error: `point d'entrée déclaré introuvable : ${declared}` };
+async function findEntries(projectDir: string, declared?: string | string[]): Promise<string[] | { error: string }> {
+  if (declared !== undefined) {
+    // Une LISTE, parce qu'un framework à conventions pose plusieurs racines qui ne
+    // s'importent pas entre elles : un `layout` et une `page` d'App Router. Avec une
+    // entrée unique, le layout — fichier obligatoire — était déclaré injoignable.
+    const liste = (Array.isArray(declared) ? declared : [declared]).filter((d) => typeof d === "string" && d !== "");
+    if (!liste.length) return { error: "aucun point d'entrée déclaré (« entry » vide)" };
+    // La liste ne relâche pas la règle : les entrées valides ne rattrapent pas celle qui
+    // manque, sinon une faute de frappe disparaîtrait dans un verdict vert.
+    const manquants = liste.filter((d) => !existsSync(resolve(projectDir, d)));
+    if (manquants.length) {
+      return { error: `point(s) d'entrée déclaré(s) introuvable(s) : ${manquants.join(", ")}` };
+    }
+    return liste.map((d) => resolve(projectDir, d));
   }
   const html = ["index.html", join("src", "index.html"), join("public", "index.html")]
     .map((p) => resolve(projectDir, p))
@@ -168,7 +260,7 @@ async function findEntries(projectDir: string, declared?: string): Promise<strin
  * Parcourt le graphe depuis les points d'entrée et renvoie les livrables jamais atteints.
  * `roots` : dossiers de livrables à contrôler (défaut `src/`).
  */
-export async function analyzeReachability(projectDir: string, roots = ["src"], entry?: string): Promise<ReachabilityReport> {
+export async function analyzeReachability(projectDir: string, roots = ["src"], entry?: string | string[]): Promise<ReachabilityReport> {
   try {
     const found = await findEntries(projectDir, entry);
     const rel = (p: string) => relative(projectDir, p).replace(/\\/g, "/");
@@ -187,6 +279,7 @@ export async function analyzeReachability(projectDir: string, roots = ["src"], e
     }
 
     // Parcours en largeur du graphe réel.
+    const alias = await lireAlias(projectDir);
     const seen = new Set(entries);
     const queue = [...entries];
     while (queue.length) {
@@ -200,7 +293,7 @@ export async function analyzeReachability(projectDir: string, roots = ["src"], e
         : CODE_EXT.has(ext) ? moduleReferences(content)
         : [];
       for (const spec of specs) {
-        const target = resolveRef(projectDir, file, spec);
+        const target = resolveRef(projectDir, file, spec, alias);
         if (target && !seen.has(target)) { seen.add(target); queue.push(target); }
       }
     }

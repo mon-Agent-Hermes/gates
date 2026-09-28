@@ -391,6 +391,58 @@ describe("observation et site — ce que le contrat peut assouplir, et ce qu'il 
     } finally { await clean(); }
   }, 30_000);
 
+  it("l'app sert une page, le contrat n'a pas de section « site » : les quatre familles le DISENT, sans rougir", async () => {
+    // Le trou que ce test ferme : jusqu'ici, un projet web sans section `site` ne
+    // produisait AUCUNE ligne pour a11y/mobile/budgets/seo. Pas un « – », rien. Un vert
+    // qui n'a regardé ni l'accessibilité ni le rendu à 375 px se lisait comme un vert.
+    const { dir, clean } = await projet({
+      "serveur.mjs":
+        `import { createServer } from "node:http";\n` +
+        `createServer((q, s) => { s.setHeader("content-type", "text/html; charset=utf-8"); s.end("<!doctype html><html lang=\\"fr\\"><head><title>Démo</title></head><body><h1>Démo</h1></body></html>"); }).listen(38494);\n` +
+        `process.on("SIGTERM", () => process.exit(0));\n`,
+      "gates.json": JSON.stringify({
+        app: { start: "node serveur.mjs", url: "http://127.0.0.1:38494/", readyTimeoutMs: 20000 },
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "smoke").status).toBe("passed");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) {
+        expect(byName(r, f), f).toBeDefined();
+        expect(byName(r, f).status, f).toBe("skipped");
+        // Ce qu'AC-6 exige, et rien de plus : la clé qui manque et la famille sont
+        // nommées. S'accrocher à la phrase exacte ferait d'une reformulation un échec.
+        expect(byName(r, f).output, f).toMatch(/section « site »/);
+        expect(byName(r, f).output, f).toContain(f);
+      }
+      // L'omission se VOIT, elle ne rougit pas : auditer se déclare au contrat et passe
+      // par `!approuve`. Un juge qui déciderait seul devinerait — défaut n°5.
+      expect(r.ok).toBe(true);
+    } finally { await clean(); }
+  }, 60_000);
+
+  it("une API qui sert du JSON ne reçoit pas ce rappel : elle n'a pas de page", async () => {
+    // La contrepartie du test précédent, et la raison pour laquelle le déclencheur est le
+    // `content-type` observé et non `app.url` : une API déclare `app.url` comme un site.
+    const { dir, clean } = await projet({
+      "serveur.mjs":
+        `import { createServer } from "node:http";\n` +
+        `createServer((q, s) => { s.setHeader("content-type", "application/json"); s.end(JSON.stringify({ ok: true })); }).listen(38495);\n` +
+        `process.on("SIGTERM", () => process.exit(0));\n`,
+      "gates.json": JSON.stringify({
+        app: { start: "node serveur.mjs", url: "http://127.0.0.1:38495/", readyTimeoutMs: 20000 },
+      }),
+    });
+    try {
+      const r = await check(dir);
+      if (!r || "configError" in r) throw new Error("config invalide");
+      expect(byName(r, "smoke").status).toBe("passed");
+      for (const f of ["a11y", "mobile", "budgets", "seo"]) expect(byName(r, f), f).toBeUndefined();
+      expect(r.ok).toBe(true);
+    } finally { await clean(); }
+  }, 60_000);
+
   it("un site dont le smoke est rouge n'est PAS audité : un audit sur une page cassée ne prouve rien", async () => {
     const { dir, clean } = await projet({
       // L'appli démarre (« / » répond) mais la route déclarée n'est pas montée : le smoke
