@@ -31,6 +31,7 @@ export type ContratPlanifiable = {
   site?: { bloquant?: string[] };
   docs?: unknown;
   observation?: string[];
+  qualite?: { seuil?: number };
   specFile?: string;
 };
 
@@ -113,6 +114,16 @@ export function construirePlan(
 
   if (cfg.docs !== undefined) juge("docs", "section « docs » déclarée");
   else non("docs", "aucune section « docs » au contrat");
+
+  // Le juge de qualité ne tourne pas dans `check` : c'est `gates juge`, dans un job CI à
+  // part (il appelle un modèle). Il est prévu pour tout projet ; ce qu'il pourra noter
+  // dépend des preuves que le contrat permet de recueillir.
+  const grilles = [
+    siteDeclare ? "écran (captures de la page)" : null,
+    probes.some((p) => p.kind === "cli" || p.kind === "http") || cfg.docs !== undefined ? "usage (traces des probes cli/http, doc)" : null,
+  ].filter(Boolean);
+  if (grilles.length) juge("qualite", `par « gates juge », seuil ${cfg.qualite?.seuil ?? 7}/10 — grilles : ${grilles.join(", ")}`);
+  else non("qualite", "aucune preuve à recueillir : ni page déclarée, ni probe cli/http, ni doc");
 
   const couverts = new Set(probes.map((p) => p.criterion).filter((c): c is string => !!c));
   return {

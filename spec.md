@@ -9,8 +9,14 @@ vérifications déclarées, et rend un verdict qu'un agent ne peut pas contourne
 (statique et par exécution), probes d'observation de l'artefact, verdict par critère,
 sortie texte et JSON, codes de sortie.
 
-**Hors** : correction du code fautif, jugement de qualité, tout appel réseau pendant la
-vérification (un juge joignable par le réseau n'est pas un juge).
+**Hors** : correction du code fautif, tout appel réseau pendant la vérification (un juge
+joignable par le réseau n'est pas un juge).
+
+**Le juge de qualité, à part** (29/09/2026) : « est-ce au niveau ? » ne se mesure pas avec
+un sélecteur. `gates check --preuves` recueille ce qu'un utilisateur verrait (écrans,
+traces des probes, doc), sans appel réseau et sans changer le verdict ; `gates juge` note
+ces preuves par un modèle, sur une grille fixe. C'est la seule commande qui appelle le
+réseau, et elle n'exécute rien du projet — d'où la séparation.
 
 ## Critères d'acceptation
 
@@ -23,3 +29,5 @@ vérification (un juge joignable par le réseau n'est pas un juge).
 - **AC-7** — `entry` accepte **plusieurs** points d'entrée. Un projet dont les fichiers ne sont atteignables que depuis deux racines posées par convention du framework (un `layout` et une `page`, qui ne s'importent pas l'un l'autre) n'est pas déclaré injoignable. Une entrée déclarée **introuvable**, seule ou dans une liste, reste une erreur nommée : on déclare, on ne devine pas.
 - **AC-8** — l'assemblage résout les **alias de chemin** de `tsconfig.json` (`compilerOptions.paths`). Un fichier importé uniquement par `@/…` n'est pas déclaré injoignable : sinon la convention par défaut d'un framework rend rouge un projet correctement câblé, et le juge dicte l'écriture du code au lieu de la vérifier.
 - **AC-9** — `gates plan` dit, **sans rien exécuter**, ce qu'un contrat fera juger et ce qu'il ne fera **pas** juger, avec la raison de chaque contrôle absent, et il énumère les règles que chaque famille porte. Un contrat invalide sort en **2**, comme pour `check` : on ne planifie pas sur un contrat que le juge refuserait. C'est ce qui rend inutile — et faux — d'affirmer de mémoire ce que le juge sait faire.
+- **AC-10** — `gates check --preuves <dossier>` écrit, pour **tout type de projet**, un `manifeste.json` des preuves d'usage : la trace de chaque probe `cli` (commande, sortie, code de sortie) et `http` hors page HTML (requête, statut, corps), la doc déclarée, et — quand le projet déclare une page — ses écrans en mobile et en bureau, chacun avec son empreinte. Le verdict et le code de sortie sont ceux du même `check` sans `--preuves`.
+- **AC-11** — `gates juge --preuves <dossier>` note les preuves sur la grille qui leur correspond (`ecran`, `usage`), par la médiane de trois jugements, et nomme chaque grille qu'il n'a **pas** pu noter. Il sort en **2** — jamais en 0 — quand il n'a pas pu juger : pas de preuves, preuve altérée depuis la capture, contrat invalide, CLI Claude absent ou en échec, moins de deux réponses exploitables. Sous le seuil, il sort en 1 avec `--bloquant`, en 0 sinon, et nomme dans les deux cas le critère, l'endroit et la correction.
