@@ -43,6 +43,20 @@ describe("probe cli", () => {
     expect(r.output).toMatch(/code de sortie 3/);
   });
 
+  it("garde la TRACE de ce qu'un utilisateur aurait vu — preuve du juge de qualité, pas du verdict", async () => {
+    const p: Probe = {
+      id: "aide", kind: "cli",
+      run: `node -e "console.log('usage : outil <fichier>'); console.error('erreur : fichier manquant'); process.exit(2)"`,
+      expect: { exitCode: 2 },
+    };
+    const r = await runProbe(p, 30_000);
+    expect(r.status).toBe("passed");
+    expect(r.trace).toMatch(/^\$ node -e/);
+    expect(r.trace).toMatch(/usage : outil <fichier>/);
+    expect(r.trace).toMatch(/erreur : fichier manquant/);
+    expect(r.trace).toMatch(/\[code de sortie 2\]/);
+  });
+
   it("fichier attendu absent → échec", async () => {
     const p: Probe = {
       id: "produit-un-fichier", kind: "cli",

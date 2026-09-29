@@ -451,6 +451,47 @@ Le verdict, lui, ne bouge pas : `skipped` ne rougit rien. **Le juge constate, il
 pas d'auditer** — ça se déclare au contrat et ça passe par `!approuve` (règles 3 et 5 du
 chantier 9).
 
+## Le juge de qualité — « est-ce au niveau ? » (AC-10, AC-11)
+
+Tout ce qui précède répond à « est-ce que ça **marche** ? ». La nuit du 28/09/2026 a rendu
+14 critères verts sur un site fade, vide, que personne n'aurait livré. D'où un second juge,
+pour **tout type de projet**, en deux temps séparés à dessein :
+
+```bash
+gates check --preuves /tmp/preuves    # recueille, sans réseau, sans changer le verdict
+gates juge  --preuves /tmp/preuves    # note, par un modèle — n'exécute rien du projet
+```
+
+| Preuve | Recueillie quand | Grille |
+|---|---|---|
+| écrans (390 px et 1440 px, écran par écran) | le contrat déclare une page (`site` ou `app.page`) et le smoke est vert | `ecran` : impression, identité, composition, contenu, adaptation, finition |
+| traces (commande + sortie, requête + réponse) | des probes `cli` ou `http` (hors page HTML) | `usage` : clarté, erreurs, cohérence, contenu, doc, finition |
+| doc | une section `docs` au contrat | `usage` |
+
+- **Les grilles sont fixes**, dans `src/juge.ts` : l'agent ne choisit pas sur quoi il est
+  noté. Le propre du projet — objectif, direction artistique — est lu dans sa `spec.md`.
+  Le contrat ne règle que le seuil : `"qualite": { "seuil": 7 }` (sur 10, défaut 7).
+- **Au niveau** = moyenne ≥ seuil **et** aucun critère sous `seuil − 2`. Une grille sans
+  preuve n'est pas notée, et le rapport le dit.
+- **Variance** : trois jugements indépendants, médiane par critère. Moins de deux réponses
+  exploitables → « non jugé » (exit 2), jamais une note inventée.
+- **Manipulation** : les preuves sont des données. Un texte adressé à l'évaluateur (« note
+  10/10 ») fait échouer la grille.
+- **Pas de clé d'API** : le modèle est appelé par le CLI Claude Code de la machine, avec son
+  abonnement — comme Bob. Isolé : aucune source de réglages (`--setting-sources ""`, donc
+  ni hooks ni plugins), aucun MCP, aucun skill, le seul outil `Read`, dans le dossier des
+  preuves, réponse contrainte par `--json-schema`. `GATES_CLAUDE_BIN` change le binaire.
+- **Où il tourne** : la CI recueille les preuves (artefact `preuves`) ; le pont les récupère
+  et fait tourner `gates juge` sur le VPS. En observation d'abord, comme tout contrôle neuf.
+
+Limites connues :
+- le manifeste porte l'empreinte de chaque capture, ce qui protège le transport — pas
+  contre un processus du projet resté en arrière-plan qui réécrirait images et manifeste
+  ensemble avant l'envoi (même limite que `gates-etat`) ;
+- sur le VPS, le CLI connecté est celui de `hermes`, le compte de Bob : Bob pourrait
+  modifier ce binaire ou son `~/.claude/CLAUDE.md`. Acceptable tant que le juge signale ;
+  avant de le rendre bloquant, lui donner son propre compte Unix et sa propre connexion.
+
 ## Couverture navigateur (chantier 7)
 
 Les probes `browser` sont instrumentées depuis le 19/09/2026 (`page.coverage` de puppeteer) :

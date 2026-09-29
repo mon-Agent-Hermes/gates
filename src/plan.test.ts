@@ -29,6 +29,15 @@ describe("gates plan — ce que le contrat fera juger", () => {
     expect(renderPlan(p)).toMatch(/AC-2 — ils compteront comme des ÉCHECS/);
   });
 
+  it("le juge de qualité est annoncé pour tout type de projet, avec les grilles que ses preuves permettent", () => {
+    const site = construirePlan({ site: {} }, spec([]));
+    expect(ligne(site, "qualite").detail).toMatch(/écran/);
+    const cli = construirePlan({ probes: [{ id: "a", kind: "cli" }], qualite: { seuil: 8 } }, spec([]));
+    expect(ligne(cli, "qualite").detail).toMatch(/seuil 8\/10.*usage/);
+    expect(ligne(cli, "qualite").detail).not.toMatch(/écran/);
+    expect(ligne(construirePlan({}, spec([])), "qualite").juge).toBe(false);
+  });
+
   it("le rendu dit toujours qu'il n'a rien exécuté — un plan n'est pas un verdict", () => {
     const texte = renderPlan(construirePlan({}, spec([])));
     expect(texte).toMatch(/rien n'a été exécuté/);

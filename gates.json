@@ -91,6 +91,20 @@
       "kind": "cli",
       "run": "cd fixtures/projet-config-invalide && node ../../bin/gates.mjs plan",
       "expect": { "exitCode": 2, "stderr": "/clé inconnue « json »/" }
+    },
+    {
+      "id": "preuves-recueillies-pour-un-projet-sans-ecran",
+      "criterion": "AC-10",
+      "kind": "cli",
+      "run": "cd fixtures/projet-sain && node ../../bin/gates.mjs check --preuves $TMP/p && node -e \"process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))\" $TMP/p/manifeste.json",
+      "expect": { "exitCode": 0, "stdout": "/\"id\": \"lance\"[\\s\\S]*node src/main\\.mjs[\\s\\S]*code de sortie 0/" }
+    },
+    {
+      "id": "juge-sans-preuves-dit-non-juge",
+      "criterion": "AC-11",
+      "kind": "cli",
+      "run": "cd fixtures/projet-sain && node ../../bin/gates.mjs juge --preuves dossier-absent",
+      "expect": { "exitCode": 2, "stderr": "/non jugé — aucun manifeste\\.json lisible/" }
     }
   ],
   "coverage": {

@@ -122,7 +122,17 @@ export type ProbeResult = {
   criterion?: string;
   status: "passed" | "failed" | "skipped";
   output: string;
+  /**
+   * Ce qui s'est passé, tel qu'un utilisateur l'aurait vu (commande et sortie, requête et
+   * réponse), borné. Jamais lu par le verdict : c'est une PREUVE pour le juge de qualité
+   * (`gates juge`), qui note l'usage d'un projet sans écran.
+   */
+  trace?: string;
 };
+
+/** Longueur max d'une trace : assez pour juger un message, pas de quoi noyer le juge. */
+export const TRACE_MAX = 4000;
+const borner = (t: string) => (t.length > TRACE_MAX ? `${t.slice(0, TRACE_MAX)}\n[… ${t.length - TRACE_MAX} caractères coupés]` : t);
 
 // ── Validation au CHARGEMENT (§2.4) ──────────────────────────────────────────────
 
@@ -274,6 +284,7 @@ const skip = (p: { id: string; criterion?: string }, output: string): ProbeResul
 async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: CoverageContext): Promise<ProbeResult> {
   const tmp = await mkdtemp(join(tmpdir(), "gates-probe-"));
   const reasons: string[] = [];
+  let trace: string | undefined;
   try {
     const exp = p.expect ?? {};
     const res = await execa(expand(p.run, tmp, cov), {
@@ -289,6 +300,7 @@ async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: Co
       // dans `$COV` à sa sortie — d'où l'exigence d'une sortie PROPRE.
       env: { FORCE_COLOR: "0", ...cov?.env },
     });
+    trace = borner(`$ ${p.run.replace(/\$TMP/g, "<tmp>")}\n${res.all ?? ""}\n[code de sortie ${res.exitCode}]`);
     if (exp.exitCode !== undefined && res.exitCode !== exp.exitCode) {
       reasons.push(`code de sortie ${res.exitCode} (attendu ${exp.exitCode})`);
     }
@@ -311,7 +323,8 @@ async function runCliProbe(p: CliProbe, timeoutMs: number, dir: string, cov?: Co
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
-  return reasons.length ? fail(p, reasons.join(" ; ")) : pass(p, "effet observé (code/sortie/fichiers conformes)");
+  const r = reasons.length ? fail(p, reasons.join(" ; ")) : pass(p, "effet observé (code/sortie/fichiers conformes)");
+  return trace ? { ...r, trace } : r;
 }
 
 async function runArtifactProbe(p: ArtifactProbe, timeoutMs: number, dir: string, cov?: CoverageContext): Promise<ProbeResult> {
@@ -414,7 +427,11 @@ async function runHttpProbe(p: HttpProbe, baseUrl: string): Promise<ProbeResult>
       if (!textMatches(v, got)) reasons.push(`en-tête ${k} = « ${got} » ne correspond pas à ${v}`);
     }
   }
-  return reasons.length ? fail(p, `${method} ${p.request.path} : ${reasons.join(" ; ")}`) : pass(p, `${method} ${p.request.path} → ${status}`);
+  const r = reasons.length ? fail(p, `${method} ${p.request.path} : ${reasons.join(" ; ")}`) : pass(p, `${method} ${p.request.path} → ${status}`);
+  // Une page HTML n'est pas une preuve d'usage lisible : les captures la montrent mieux.
+  const type = headers?.get("content-type") ?? "";
+  if (status === null || /text\/html/i.test(type)) return r;
+  return { ...r, trace: borner(`${method} ${p.request.path}${p.request.body ? `\n${p.request.body}` : ""}\n→ ${status} ${type}\n${body}`) };
 }
 
 async function runBrowserProbe(

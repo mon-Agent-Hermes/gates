@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,8 @@ import { FAMILLES, runSiteChecks, validateSite, type Famille, type SiteConfig } 
 import { checkDocs, validateDocs, type DocsConfig } from "./docs.js";
 import { ciblesDe, preparerArbreNeutralise, verdictPhaseRouge } from "./phase-rouge.js";
 import { construirePlan, renderPlan } from "./plan.js";
+import { capturerEcrans, ecrirePreuves, lirePreuves, type Ecran } from "./preuves.js";
+import { jugerQualite, renderJuge, SEUIL_DEFAUT } from "./juge.js";
 
 /**
  * Contrat de `gates.json` (§2.4 — version minimale du premier jet).
@@ -65,6 +67,11 @@ export type GatesConfig = {
    * contrôle neuf — un linter qu'on vient de poser. Jamais le juge fonctionnel.
    */
   observation?: string[];
+  /**
+   * Juge de qualité (`gates juge`) : actif pour tout projet, avec une grille fixe. Seul le
+   * seuil (sur 10, défaut 7) se règle ici — le contrat approuvé, pas le projet.
+   */
+  qualite?: { seuil?: number };
 };
 
 async function loadConfig(dir: string): Promise<GatesConfig | null> {
@@ -89,7 +96,19 @@ function validateConfig(cfg: GatesConfig): string[] {
     ...validateSite(cfg.site),
     ...validateDocs(cfg.docs, (cfg.probes ?? []).map((p) => p.id)),
     ...validateObservation(cfg.observation),
+    ...validateQualite(cfg.qualite),
   ];
+}
+
+function validateQualite(q: unknown): string[] {
+  if (q === undefined) return [];
+  if (!q || typeof q !== "object" || Array.isArray(q)) return ["qualite : un objet est attendu"];
+  const errors: string[] = [];
+  for (const [k, v] of Object.entries(q as Record<string, unknown>)) {
+    if (k !== "seuil") errors.push(`qualite : clé inconnue « ${k} »`);
+    else if (typeof v !== "number" || v < 1 || v > 10) errors.push("qualite.seuil : un nombre entre 1 et 10 est attendu");
+  }
+  return errors;
 }
 
 /**
@@ -191,7 +210,7 @@ async function phaseRouge(dir: string, cfg: GatesConfig): Promise<{ ok: boolean;
  */
 export async function check(
   dir: string,
-  opts: { only?: string[] | null; baseUrl?: string | null; phaseRouge?: boolean } = {},
+  opts: { only?: string[] | null; baseUrl?: string | null; phaseRouge?: boolean; preuves?: string | null } = {},
 ): Promise<{ ok: boolean; report: GatesReport } | { configError: string } | null> {
   const cfg = await loadConfig(dir);
   if (!cfg) return null;
@@ -282,6 +301,7 @@ export async function check(
   //      MÊME instance, démarrée UNE SEULE fois par le harnais puis arrêtée (au lieu
   //      d'un démarrage pour smoke + un autre pour les probes).
   let probeResults: ProbeResult[] = [];
+  let ecrans: Ecran[] = [];
   {
     // `--base-url` : le site est DÉJÀ servi (une prévisualisation Vercel, par exemple).
     // Rien à démarrer, et `app.start` n'est pas lu — on juge alors ce que le déploiement
@@ -320,6 +340,14 @@ export async function check(
       if (siteFamilies.length) {
         if (smoke?.status === "passed") checks.push(...await runSiteChecks(baseUrl, cfg.site ?? {}, siteFamilies));
         else for (const f of siteFamilies) checks.push(siteSkipped(f, "le smoke n'est pas vert"));
+      }
+      // Les écrans du juge de qualité, pendant que l'app tourne encore. Pas un check : ils
+      // ne changent pas le verdict, et une page qui ne rend pas n'a rien à montrer.
+      if (opts.preuves && siteDeclared && smoke?.status === "passed") {
+        ecrans = await capturerEcrans(baseUrl, cfg.site?.pages ?? ["/"], opts.preuves).catch((e) => {
+          process.stderr.write(`gates : captures impossibles — ${String(e?.message ?? e).slice(0, 300)}\n`);
+          return [];
+        }) ?? [];
       }
       // Rien de déclaré, mais l'app sert une PAGE : les quatre familles ne tourneront pas.
       // Le taire rendrait un vert qui n'a regardé ni l'accessibilité, ni le rendu à 375 px,
@@ -424,6 +452,18 @@ export async function check(
   const criteria = ranProbes ? buildCriteria(declaredCriteria.map((c) => c.id), probeResults) : undefined;
 
   const report = buildReport(applyObservation(checks, cfg.observation), criteria);
+
+  // 9. Les preuves du juge de qualité : écrans (déjà capturés), traces des probes, doc.
+  //    Recueillies pour tout type de projet ; c'est le juge qui dit ce qu'il peut noter.
+  if (opts.preuves) {
+    const docFichier = cfg.docs ? (cfg.docs.file ?? "README.md") : null;
+    const docTexte = docFichier ? await readFile(resolve(dir, docFichier), "utf8").catch(() => null) : null;
+    await ecrirePreuves(opts.preuves, {
+      ecrans,
+      traces: probeResults.flatMap((r) => (r.trace ? [{ id: r.id, criterion: r.criterion, status: r.status, trace: r.trace }] : [])),
+      doc: docFichier && docTexte !== null ? { fichier: docFichier, texte: docTexte } : null,
+    }).catch((e) => process.stderr.write(`gates : preuves non écrites — ${String(e?.message ?? e).slice(0, 300)}\n`));
+  }
   return { ok: report.ok, report };
 }
 
@@ -451,7 +491,7 @@ function siteSkipped(name: Famille, why: string): CheckResult {
 }
 
 export function parseArgs(argv: string[]): {
-  json: boolean; only: string[] | null; baseUrl: string | null; phaseRouge: boolean; etatFichier: string | null;
+  json: boolean; only: string[] | null; baseUrl: string | null; phaseRouge: boolean; etatFichier: string | null; preuves: string | null;
 } {
   const json = argv.includes("--json");
   const phaseRouge = argv.includes("--phase-rouge");
@@ -463,7 +503,9 @@ export function parseArgs(argv: string[]): {
   const baseUrl = j >= 0 ? (argv[j + 1] ?? "") : null;
   const k = argv.indexOf("--etat-fichier");
   const etatFichier = k >= 0 && argv[k + 1] ? argv[k + 1] : null;
-  return { json, only, baseUrl, phaseRouge, etatFichier };
+  const c = argv.indexOf("--preuves");
+  const preuves = c >= 0 && argv[c + 1] ? resolve(argv[c + 1]) : null;
+  return { json, only, baseUrl, phaseRouge, etatFichier, preuves };
 }
 
 /**
@@ -494,14 +536,16 @@ export function sortieGitHub(
 
 export async function main(argv: string[]): Promise<number> {
   if (argv[0] === "plan") return await planifier(process.cwd());
+  if (argv[0] === "juge") return await juge(process.cwd(), argv.slice(1));
   if (argv[0] !== "check") {
     process.stderr.write(
-      "usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin]\n" +
+      "usage : gates check [--json] [--only nom1,nom2] [--base-url https://…] [--phase-rouge] [--etat-fichier chemin] [--preuves dossier]\n" +
+      "        gates juge --preuves dossier [--etat-fichier chemin] [--bloquant] — juge de qualité (appelle un modèle, n'exécute rien du projet)\n" +
       "        gates plan   — ce que le contrat fera juger, et ce qu'il ne fera pas juger (rien n'est exécuté)\n",
     );
     return 2;
   }
-  const { json, only, baseUrl, phaseRouge, etatFichier } = parseArgs(argv.slice(1));
+  const { json, only, baseUrl, phaseRouge, etatFichier, preuves } = parseArgs(argv.slice(1));
   const gh = sortieGitHub(json);
   const erreurConfig = (msg: string) => [`::error title=${escapeProperty("gates config")}::${escapeData(msg)}`];
   // Comme les annotations : seule la vérification principale écrit le verdict en fichier.
@@ -511,7 +555,7 @@ export async function main(argv: string[]): Promise<number> {
     }
   };
   gh.ouvrir();
-  const res = await check(process.cwd(), { only, baseUrl, phaseRouge });
+  const res = await check(process.cwd(), { only, baseUrl, phaseRouge, preuves: phaseRouge || baseUrl !== null ? null : preuves });
   if (!res) {
     process.stderr.write("gates : aucun gates.json lisible dans le dossier courant (config invalide, exit 2)\n");
     gh.fermer(erreurConfig("aucun gates.json lisible (config invalide, exit 2)"));
@@ -561,6 +605,46 @@ async function planifier(dir: string): Promise<number> {
   }
   process.stdout.write(renderPlan(construirePlan(cfg, { fichier, lisible, criteres })) + "\n");
   return 0;
+}
+
+/**
+ * `gates juge` : note des preuves déjà recueillies, par le CLI Claude Code de la machine
+ * (l'abonnement, pas de clé d'API). N'exécute RIEN du projet. Le contrat (`gates.json`,
+ * `spec.md`) est lu dans le dossier courant : le contrat approuvé, seul.
+ *
+ * Actif pour TOUT projet, sans déclaration : « est-ce au niveau ? » vaut pour chaque
+ * livraison. Le contrat ne règle que le seuil (`qualite.seuil`).
+ *
+ * exit 0 = au niveau (ou signalé en observation) · 1 = sous le niveau en mode `--bloquant`
+ * · 2 = non jugé (pas de preuves, contrat invalide, claude absent ou en échec). « Je n'ai pas pu
+ * juger » n'est jamais un vert.
+ */
+async function juge(dir: string, argv: string[]): Promise<number> {
+  const { preuves, etatFichier, json } = parseArgs(argv);
+  const bloquant = argv.includes("--bloquant");
+  const nonJuge = async (msg: string) => {
+    process.stderr.write(`gates juge : non jugé — ${msg}\n`);
+    if (etatFichier) await writeFile(etatFichier, JSON.stringify({ juge: false, erreur: msg }) + "\n");
+    return 2;
+  };
+  const cfg = await loadConfig(dir);
+  if (!cfg) return nonJuge("aucun gates.json lisible");
+  const erreurs = validateConfig(cfg);
+  if (erreurs.length) return nonJuge(`gates.json invalide — ${erreurs.join(" ; ")}`);
+  if (!preuves) return nonJuge("--preuves <dossier> est requis");
+  const lu = await lirePreuves(preuves);
+  if ("erreur" in lu) return nonJuge(lu.erreur);
+  // Le chemin RÉEL : sous Windows, un nom court (`JEAN-B~1`) fait refuser la lecture des
+  // captures par Claude Code, qui y voit un chemin suspect (constaté au premier essai).
+  const dossier = await realpath(preuves).catch(() => preuves);
+  const spec = await readFile(resolve(dir, cfg.specFile ?? "spec.md"), "utf8").catch(() => null);
+  const v = await jugerQualite(lu.manifeste, lu.images, spec, dossier, cfg.qualite?.seuil ?? SEUIL_DEFAUT)
+    .catch((e: any) => ({ erreur: String(e?.message ?? e).slice(0, 300) }));
+  if ("erreur" in v) return nonJuge(v.erreur);
+  const mode = bloquant ? "bloquant" : "observation";
+  process.stdout.write((json ? JSON.stringify(v, null, 2) : renderJuge(v, mode)) + "\n");
+  if (etatFichier) await writeFile(etatFichier, JSON.stringify({ juge: true, mode, ...v }) + "\n");
+  return v.ok || !bloquant ? 0 : 1;
 }
 
 /**
